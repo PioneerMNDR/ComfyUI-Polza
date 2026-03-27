@@ -135,6 +135,122 @@ def _is_audio_model(model: str) -> bool:
     return any(prefix in model_lower for prefix in AUDIO_MODEL_PREFIXES)
 
 
+def _get_video_model_type(model: str) -> str:
+    """Возвращает тип видео-модели для правильного форматирования параметров."""
+    model_lower = model.lower()
+    if "kling" in model_lower:
+        return "kling"
+    elif "wan" in model_lower:
+        return "wan"
+    elif "veo" in model_lower:
+        return "veo"
+    elif "sora" in model_lower:
+        return "sora"
+    elif "seedance" in model_lower:
+        return "seedance"
+    return "unknown"
+
+
+def _build_video_input(
+    model: str,
+    prompt: str,
+    aspect_ratio: str,
+    duration: str,
+    video_resolution: str,
+    sound: bool,
+    multi_shots: bool,
+    mode: str,
+    image: torch.Tensor | None,
+    strength: float,
+) -> dict:
+    """Строит input dict с учётом специфики каждой видео-модели."""
+
+    inp: dict = {"prompt": prompt}
+    model_type = _get_video_model_type(model)
+
+    # ── Kling 3.0 ────────────────────────────────────────────
+    if model_type == "kling":
+        # duration — число секунд
+        if duration in ("auto", "5s"):
+            inp["duration"] = 5
+        elif duration == "10s":
+            inp["duration"] = 10
+        else:
+            inp["duration"] = 5
+
+        # mode — обязателен
+        inp["mode"] = mode  # "std" или "pro"
+
+        # sound — строка
+        inp["sound"] = "true" if sound else "false"
+
+        # aspect_ratio
+        inp["aspect_ratio"] = aspect_ratio if aspect_ratio != "auto" else "16:9"
+
+        # images — пустой массив если нет входного
+        if image is None:
+            inp["images"] = []
+
+    # ── Wan 2.5 / 2.6 ────────────────────────────────────────
+    elif model_type == "wan":
+        # duration — строка "5" или "10" (без "s"!)
+        if duration in ("auto", "5s"):
+            inp["duration"] = "5"
+        elif duration == "10s":
+            inp["duration"] = "10"
+        elif duration == "15s":
+            inp["duration"] = "10"  # max 10
+        else:
+            inp["duration"] = "5"
+
+        # resolution — строка
+        if video_resolution != "auto":
+            inp["resolution"] = video_resolution
+        else:
+            inp["resolution"] = "720p"
+
+        # multi_shots — строка
+        inp["multi_shots"] = "true" if multi_shots else "false"
+
+        # images — пустой массив если нет входного
+        if image is None:
+            inp["images"] = []
+
+    # ── Veo 3 / 3.1 ──────────────────────────────────────────
+    elif model_type == "veo":
+        if aspect_ratio != "auto":
+            inp["aspect_ratio"] = aspect_ratio
+        if duration != "auto":
+            inp["duration"] = duration  # "5s", "10s" — строка с "s"
+
+    # ── Sora ─────────────────────────────────────────────────
+    elif model_type == "sora":
+        if aspect_ratio != "auto":
+            inp["aspect_ratio"] = aspect_ratio
+        if duration != "auto":
+            inp["duration"] = duration
+        if video_resolution != "auto":
+            inp["resolution"] = video_resolution
+
+    # ── Seedance ─────────────────────────────────────────────
+    elif model_type == "seedance":
+        if aspect_ratio != "auto":
+            inp["aspect_ratio"] = aspect_ratio
+        if duration != "auto":
+            inp["duration"] = duration
+
+    # ── Fallback для неизвестных ─────────────────────────────
+    else:
+        if aspect_ratio != "auto":
+            inp["aspect_ratio"] = aspect_ratio
+        if duration != "auto":
+            inp["duration"] = duration
+        if video_resolution != "auto":
+            inp["resolution"] = video_resolution
+
+    return inp
+
+
 def _classify_url(url: str) -> str:
     """Return 'video', 'audio', or 'image'."""
     lo = url.lower().split("?")[0]
@@ -297,6 +413,14 @@ class PolzaMedia:
                 "enable_safety": ("BOOLEAN", {"default": True}),
                 "duration": (DURATIONS, {"default": "auto"}),
                 "video_resolution": (VIDEO_RESOLUTIONS, {"default": "auto"}),
+                "kling_mode": (["std", "pro"], {
+                    "default": "std",
+                    "tooltip": "Режим Kling 3.0: std (быстрее) или pro (качественнее)",
+                }),
+                "multi_shots": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Мульти-шоты для Wan 2.6 (несколько сцен в одном видео)",
+                }),
                 "sound": ("BOOLEAN", {"default": False}),
                 "voice": ("STRING", {"default": ""}),
                 "speed": ("FLOAT", {"default": 1.0, "min": 0.7, "max": 1.2, "step": 0.05}),
@@ -334,6 +458,8 @@ class PolzaMedia:
         enable_safety: bool = True,
         duration: str = "auto",
         video_resolution: str = "auto",
+        kling_mode: str = "std",
+        multi_shots: bool = False,
         sound: bool = False,
         voice: str = "",
         speed: float = 1.0,
@@ -342,7 +468,7 @@ class PolzaMedia:
     ) -> dict:
 
         t0 = time.time()
-        logger.info("PolzaMedia: start  model=%s", model)
+        logger.info("PolzaMedia: start  model=%s  type=%s", model, model_type)
 
         # ── 1. API key ──────────────────────────────────────────
         try:
@@ -354,26 +480,43 @@ class PolzaMedia:
             return self._error("❌ Промпт не может быть пустым")
 
         # ── 2. Build input dict ──────────────────────────────────
-        inp: dict = {"prompt": prompt}
+        model_type = _get_video_model_type(model)
 
-        if aspect_ratio != "auto":      inp["aspect_ratio"] = aspect_ratio
-        if seed > 0:                    inp["seed"] = seed
-        if quality != "auto":           inp["quality"] = quality
-        if image_resolution != "auto":  inp["image_resolution"] = image_resolution
-        if output_format != "png":      inp["output_format"] = output_format
-        if max_images > 1:              inp["max_images"] = max_images
-        if guidance_scale > 0:          inp["guidance_scale"] = guidance_scale
-        if is_enhance:                  inp["isEnhance"] = True
-        if not enable_safety:           inp["enable_safety_checker"] = False
-
-        # Video models require duration and resolution — use defaults if "auto"
-        if _is_video_model(model):
-            inp["duration"] = duration if duration != "auto" else "5s"
-            inp["resolution"] = video_resolution if video_resolution != "auto" else "720p"
-            if sound:
-                inp["sound"] = True
+        if model_type in ("kling", "wan", "veo", "sora", "seedance"):
+            # Видео-модель — используем специальный билдер
+            inp = _build_video_input(
+                model=model,
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                duration=duration,
+                video_resolution=video_resolution,
+                sound=sound,
+                multi_shots=multi_shots,
+                mode=kling_mode,
+                image=image,
+                strength=strength,
+            )
         else:
-            # Non-video models — only send if not auto
+            # Изображение или аудио — общая логика
+            inp = {"prompt": prompt}
+            if aspect_ratio != "auto":
+                inp["aspect_ratio"] = aspect_ratio
+            if seed > 0:
+                inp["seed"] = seed
+            if quality != "auto":
+                inp["quality"] = quality
+            if image_resolution != "auto":
+                inp["image_resolution"] = image_resolution
+            if output_format != "png":
+                inp["output_format"] = output_format
+            if max_images > 1:
+                inp["max_images"] = max_images
+            if guidance_scale > 0:
+                inp["guidance_scale"] = guidance_scale
+            if is_enhance:
+                inp["isEnhance"] = True
+            if not enable_safety:
+                inp["enable_safety_checker"] = False
             if duration != "auto":
                 inp["duration"] = duration
             if video_resolution != "auto":
@@ -405,7 +548,8 @@ class PolzaMedia:
                 b64 = _safe_tensor_to_b64(img_4d[i], fmt="PNG")
                 encoded.append({"type": "base64", "data": f"data:image/png;base64,{b64}"})
             inp["images"] = encoded
-            inp["strength"] = strength
+            if model_type in ("kling", "wan"):
+                inp["strength"] = strength
             logger.info("PolzaMedia: attached %d image(s)", len(encoded))
 
         # ── 4. Merge extra JSON ──────────────────────────────────
@@ -421,8 +565,9 @@ class PolzaMedia:
         # ── 5. Call API ──────────────────────────────────────────
         # Log full input for debugging "This field is required" errors
         logger.info(
-            "PolzaMedia: sending input: %s",
-            json.dumps(inp, ensure_ascii=False, indent=2)
+            "PolzaMedia [%s]: %s",
+            model_type,
+            json.dumps(inp, ensure_ascii=False)
         )
         try:
             data = media_create(key, model=model, input=inp)
