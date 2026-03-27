@@ -4,13 +4,17 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 import os
 import time
 import uuid
-from typing import List
+from fractions import Fraction
+from typing import List, Optional
 
+from PIL import Image
 import torch
 import folder_paths
 
@@ -28,12 +32,39 @@ from .api import (
 
 # ── Native VIDEO support (ComfyUI >= 0.3) ────────────────────────
 try:
-    from comfy_api.latest import InputImpl
+    from comfy_api.latest import InputImpl, Types
 
     _HAS_NATIVE_VIDEO = True
 except ImportError:
     InputImpl = None
+    Types = None
     _HAS_NATIVE_VIDEO = False
+
+# ── ComfyUI video helpers ───────────────────────────────────────
+try:
+    import numpy as np
+
+    def _video_tensor_to_images(video_tensor: torch.Tensor) -> list[np.ndarray]:
+        """Convert VIDEO tensor [B,H,W,C] or [B,T,H,W,C] to list of RGB images."""
+        if video_tensor.dim() == 5:
+            # [B, T, H, W, C] → take first batch
+            video_tensor = video_tensor[0]
+        elif video_tensor.dim() == 4:
+            # Already [T, H, W, C]
+            pass
+        else:
+            raise ValueError(f"Unexpected video tensor shape: {video_tensor.shape}")
+
+        frames = []
+        for t in range(video_tensor.shape[0]):
+            frame = video_tensor[t].cpu().numpy()
+            if frame.dtype != np.uint8:
+                frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
+            frames.append(frame)
+        return frames
+except ImportError:
+    np = None
+    _video_tensor_to_images = None
 
 logger = logging.getLogger("PolzaAI")
 
@@ -231,9 +262,11 @@ class PolzaMedia:
                         "Batch: каждый фрейм [B,H,W,3] → отдельный элемент images[]."
                     ),
                 }),
-                "video_url": ("STRING", {
-                    "default": "",
-                    "tooltip": "URL видео для video-to-video генерации.",
+                "video": ("VIDEO", {
+                    "tooltip": (
+                        "Видео для video-to-video генерации (нативный VIDEO вход).\n"
+                        "Подключите выход VIDEO любого нода (LoadVideo, etc.)."
+                    ),
                 }),
                 "aspect_ratio": (ASPECT_RATIOS, {"default": "auto"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 2_147_483_647}),
@@ -271,7 +304,7 @@ class PolzaMedia:
         prompt: str,
         api_key: str = "",
         image: torch.Tensor | None = None,
-        video_url: str = "",
+        video: torch.Tensor | None = None,
         aspect_ratio: str = "auto",
         seed: int = 0,
         quality: str = "auto",
@@ -318,7 +351,21 @@ class PolzaMedia:
         if duration != "auto":          inp["duration"] = duration
         if video_resolution != "auto":  inp["resolution"] = video_resolution
         if sound:                       inp["sound"] = True
-        if video_url.strip():           inp["videos"] = [{"type": "url", "data": video_url.strip()}]
+        # ── 3a. Encode input VIDEO ─────────────────────────────────
+        if video is not None and _video_tensor_to_images is not None:
+            try:
+                frames = _video_tensor_to_images(video)
+                # Encode first frame as image for video-to-video
+                if frames:
+                    frame = frames[0]
+                    pil_img = Image.fromarray(frame)
+                    buf = io.BytesIO()
+                    pil_img.save(buf, format="PNG")
+                    b64 = base64.b64encode(buf.getvalue()).decode()
+                    inp["videos"] = [{"type": "base64", "data": f"data:image/png;base64,{b64}"}]
+                    logger.info("PolzaMedia: attached video input (%d frames, using frame 0)", len(frames))
+            except Exception as exc:
+                logger.warning("PolzaMedia: failed to encode video input: %s", exc)
         if voice.strip():               inp["voice"] = voice.strip()
         if speed != 1.0:                inp["speed"] = speed
         if language_code.strip():       inp["language_code"] = language_code.strip()
@@ -399,7 +446,8 @@ class PolzaMedia:
         # ── 9. Build native VIDEO output ─────────────────────────
         #   InputImpl.VideoFromFile() creates the object that
         #   SaveVideo / GetVideoComponents / VideoSlice understand.
-        video_output = None
+        #   If no video file but we have images → create VIDEO from components.
+        video_output: Optional[object] = None
         if video_filepath and _HAS_NATIVE_VIDEO:
             try:
                 video_output = InputImpl.VideoFromFile(video_filepath)
@@ -411,6 +459,28 @@ class PolzaMedia:
                 "PolzaMedia: video downloaded but comfy_api.latest not available. "
                 "Update ComfyUI for native VIDEO output (SaveVideo, etc.)."
             )
+        # ── 9a. Fallback: create VIDEO from generated images ──────
+        elif pil_images and not video_filepath and _HAS_NATIVE_VIDEO:
+            try:
+                # Convert PIL images to tensor batch, then to list of frames
+                video_tensor = images_to_batch_tensor(pil_images)  # [B,H,W,C] float32
+                # Ensure RGB uint8 format for VideoComponents
+                frames: list[np.ndarray] = []
+                for i in range(video_tensor.shape[0]):
+                    frame = video_tensor[i].cpu().numpy()
+                    if frame.dtype != np.uint8:
+                        frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
+                    frames.append(frame)
+                video_output = InputImpl.VideoFromComponents(
+                    Types.VideoComponents(
+                        images=frames,
+                        audio=None,
+                        frame_rate=Fraction(1),
+                    )
+                )
+                logger.info("PolzaMedia: created native VIDEO from %d image(s)", len(frames))
+            except Exception as exc:
+                logger.warning("PolzaMedia: VideoFromComponents failed: %s", exc)
 
         # ── 10. Validate we got something ────────────────────────
         if not pil_images and not video_filepath and not audio_files and not text_response:
@@ -473,7 +543,21 @@ class PolzaMedia:
     def _error(msg: str) -> dict:
         logger.error("PolzaMedia: %s", msg)
         blank = torch.zeros(1, 64, 64, 3, dtype=torch.float32)
+        # Create a minimal valid VIDEO from the blank image so SaveVideo doesn't crash
+        video_blank = None
+        if _HAS_NATIVE_VIDEO and InputImpl is not None and Types is not None:
+            try:
+                frame = (blank[0].cpu().numpy() * 255).astype(np.uint8)
+                video_blank = InputImpl.VideoFromComponents(
+                    Types.VideoComponents(
+                        images=[frame],
+                        audio=None,
+                        frame_rate=Fraction(1),
+                    )
+                )
+            except Exception as exc:
+                logger.warning("PolzaMedia: failed to create blank video: %s", exc)
         return {
             "ui":     {"text": [msg]},
-            "result": (blank, None, "", "", "", 0.0),
+            "result": (blank, video_blank, "", "", "", 0.0),
         }
