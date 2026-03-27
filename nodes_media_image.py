@@ -170,13 +170,13 @@ def _build_video_input(
 
     # ── Kling 3.0 ────────────────────────────────────────────
     if model_type == "kling":
-        # duration — число секунд
+        # duration — строка (API ожидает строку, не число)
         if duration in ("auto", "5s"):
-            inp["duration"] = 5
+            inp["duration"] = "5"
         elif duration == "10s":
-            inp["duration"] = 10
+            inp["duration"] = "10"
         else:
-            inp["duration"] = 5
+            inp["duration"] = "5"
 
         # mode — обязателен
         inp["mode"] = mode  # "std" или "pro"
@@ -650,7 +650,7 @@ class PolzaMedia:
                     frames.append(frame)
                 video_output = InputImpl.VideoFromComponents(
                     Types.VideoComponents(
-                        images=frames,
+                        images=np.stack(frames),
                         audio=None,
                         frame_rate=Fraction(1),
                     )
@@ -739,7 +739,7 @@ class PolzaMedia:
                 frame = (blank[0].cpu().numpy() * 255).astype(np.uint8)
                 video_blank = InputImpl.VideoFromComponents(
                     Types.VideoComponents(
-                        images=[frame],
+                        images=np.stack([frame]),
                         audio=None,
                         frame_rate=Fraction(1),
                     )
