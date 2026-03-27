@@ -468,7 +468,6 @@ class PolzaMedia:
     ) -> dict:
 
         t0 = time.time()
-        logger.info("PolzaMedia: start  model=%s  type=%s", model, model_type)
 
         # ── 1. API key ──────────────────────────────────────────
         try:
@@ -481,6 +480,7 @@ class PolzaMedia:
 
         # ── 2. Build input dict ──────────────────────────────────
         model_type = _get_video_model_type(model)
+        logger.info("PolzaMedia: start  model=%s  type=%s", model, model_type)
 
         if model_type in ("kling", "wan", "veo", "sora", "seedance"):
             # Видео-модель — используем специальный билдер
