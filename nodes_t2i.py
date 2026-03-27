@@ -25,9 +25,9 @@ logger = logging.getLogger("PolzaAI")
 
 # Default fallback T2I models (used if API is unreachable)
 DEFAULT_T2I_MODELS = [
-    ("gpt-image-1", "GPT Image 1 (OpenAI)"),
-    ("dall-e-3", "DALL·E 3"),
-    ("dall-e-2", "DALL·E 2"),
+    "gpt-image-1",
+    "dall-e-3",
+    "dall-e-2",
 ]
 
 
@@ -35,7 +35,7 @@ DEFAULT_T2I_MODELS = [
 _cached_t2i_models: list | None = None
 
 
-def get_t2i_models() -> list:
+def get_t2i_models() -> list[str]:
     """Load image generation models from API, fallback to defaults on error.
     
     Caches result after first successful fetch to avoid repeated HTTP calls.
@@ -102,7 +102,7 @@ class PolzaTextToImage:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": (get_t2i_models, {
+                "model": (get_t2i_models(), {
                     "default": "gpt-image-1",
                     "tooltip": "gpt-image-1, dall-e-3, dall-e-2",
                 }),

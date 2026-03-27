@@ -37,12 +37,12 @@ logger = logging.getLogger("PolzaAI")
 
 # Default fallback media models (used if API is unreachable)
 DEFAULT_MEDIA_MODELS = [
-    ("seedream-3", "Seedream 3"),
-    ("seedream-4-5", "Seedream 4.5"),
-    ("nano-banana", "Nano Banana"),
-    ("gpt-image-1", "GPT Image 1"),
-    ("flux-1-1-ultra", "Flux 1.1 Ultra"),
-    ("grok-2-image", "Grok 2 Image"),
+    "seedream-3",
+    "seedream-4-5",
+    "nano-banana",
+    "gpt-image-1",
+    "flux-1-1-ultra",
+    "grok-2-image",
 ]
 
 
@@ -50,7 +50,7 @@ DEFAULT_MEDIA_MODELS = [
 _cached_media_models: list | None = None
 
 
-def get_media_models() -> list:
+def get_media_models() -> list[str]:
     """Load image media models from API, fallback to defaults on error.
     
     Caches result after first successful fetch to avoid repeated HTTP calls.
@@ -107,7 +107,7 @@ class PolzaMediaImage:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": (get_media_models, {
+                "model": (get_media_models(), {
                     "default": "seedream-3",
                     "tooltip": (
                         "ID модели: seedream-3, seedream-4-5, nano-banana, "

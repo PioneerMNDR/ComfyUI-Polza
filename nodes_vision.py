@@ -19,11 +19,11 @@ logger = logging.getLogger("PolzaAI")
 
 # Default fallback vision models (used if API is unreachable)
 DEFAULT_VISION_MODELS = [
-    ("openai/gpt-4o", "OpenAI GPT-4o"),
-    ("openai/gpt-4o-mini", "OpenAI GPT-4o Mini"),
-    ("anthropic/claude-sonnet-4-5-20250929", "Claude Sonnet 4"),
-    ("anthropic/claude-3-5-sonnet", "Claude 3.5 Sonnet"),
-    ("google/gemini-2.5-flash-preview", "Gemini 2.5 Flash"),
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "anthropic/claude-sonnet-4-5-20250929",
+    "anthropic/claude-3-5-sonnet",
+    "google/gemini-2.5-flash-preview",
 ]
 
 
@@ -31,7 +31,7 @@ DEFAULT_VISION_MODELS = [
 _cached_vision_models: list | None = None
 
 
-def get_vision_models() -> list:
+def get_vision_models() -> list[str]:
     """Load vision-capable models from API, fallback to defaults on error.
     
     Caches result after first successful fetch to avoid repeated HTTP calls.
@@ -96,7 +96,7 @@ class PolzaVision:
                     "default": "",
                     "tooltip": "API‑ключ (пусто → env / config.json)",
                 }),
-                "model": (get_vision_models, {
+                "model": (get_vision_models(), {
                     "default": "openai/gpt-4o",
                     "tooltip": "Vision‑модель: openai/gpt-4o, anthropic/claude-sonnet-4-5-20250929, google/gemini-2.5-flash-preview …",
                 }),

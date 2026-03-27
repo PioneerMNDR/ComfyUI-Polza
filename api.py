@@ -432,20 +432,13 @@ def get_models(model_type: str | None = None, include_providers: bool = False) -
         raise PolzaAPIError(500, f"Ошибка получения моделей: {exc}")
 
 
-def get_model_options(model_type: str | None = None) -> List[Tuple[str, str]]:
+def get_model_options(model_type: str | None = None) -> List[str]:
     """
-    Get model options for ComfyUI dropdown.
-    
-    Returns list of (model_id, display_name) tuples.
+    Get model IDs for ComfyUI dropdown.
+    Returns list of model ID strings.
     """
     models = get_models(model_type=model_type)
     
-    options = []
-    for model in models:
-        model_id = model.get("id", "")
-        model_name = model.get("name", model_id)
-        options.append((model_id, model_name))
-    
-    # Sort alphabetically by display name
-    options.sort(key=lambda x: x[1].lower())
+    options = [m.get("id", "") for m in models if m.get("id")]
+    options.sort(key=str.lower)
     return options

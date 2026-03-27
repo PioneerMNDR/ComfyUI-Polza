@@ -19,13 +19,13 @@ RESPONSE_FORMATS  = ["text", "json_object"]
 
 # Default fallback models (used if API is unreachable)
 DEFAULT_MODELS = [
-    ("openai/gpt-4o", "OpenAI GPT-4o"),
-    ("openai/gpt-4o-mini", "OpenAI GPT-4o Mini"),
-    ("anthropic/claude-sonnet-4-5-20250929", "Claude Sonnet 4"),
-    ("anthropic/claude-3-5-sonnet", "Claude 3.5 Sonnet"),
-    ("google/gemini-2.5-flash-preview", "Gemini 2.5 Flash"),
-    ("deepseek/deepseek-chat", "DeepSeek Chat"),
-    ("deepseek/deepseek-r1", "DeepSeek R1"),
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "anthropic/claude-sonnet-4-5-20250929",
+    "anthropic/claude-3-5-sonnet",
+    "google/gemini-2.5-flash-preview",
+    "deepseek/deepseek-chat",
+    "deepseek/deepseek-r1",
 ]
 
 
@@ -33,7 +33,7 @@ DEFAULT_MODELS = [
 _cached_chat_models: list | None = None
 
 
-def get_chat_models() -> list:
+def get_chat_models() -> list[str]:
     """Load chat models from API, fallback to defaults on error.
     
     Caches result after first successful fetch to avoid repeated HTTP calls.
@@ -81,7 +81,7 @@ class PolzaChat:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": (get_chat_models, {
+                "model": (get_chat_models(), {
                     "default": "openai/gpt-4o",
                     "tooltip": (
                         "ID модели: openai/gpt-4o, anthropic/claude-sonnet-4-5-20250929, "
