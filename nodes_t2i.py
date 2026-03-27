@@ -16,11 +16,29 @@ from .api import (
     images_to_batch_tensor,
     extract_usage_info,
     PolzaAPIError,
+    get_model_options,
 )
 
 logger = logging.getLogger("PolzaAI")
 
 # ── Dropdown constants ────────────────────────────────────────────────
+
+# Default fallback T2I models (used if API is unreachable)
+DEFAULT_T2I_MODELS = [
+    ("gpt-image-1", "GPT Image 1 (OpenAI)"),
+    ("dall-e-3", "DALL·E 3"),
+    ("dall-e-2", "DALL·E 2"),
+]
+
+
+def get_t2i_models() -> list:
+    """Load image generation models from API, fallback to defaults on error."""
+    try:
+        return get_model_options(model_type="image")
+    except Exception as e:
+        logger.warning("Failed to fetch T2I models from API: %s. Using defaults.", e)
+        return DEFAULT_T2I_MODELS
+
 
 SIZES = [
     "auto",
@@ -72,7 +90,7 @@ class PolzaTextToImage:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("STRING", {
+                "model": (get_t2i_models, {
                     "default": "gpt-image-1",
                     "tooltip": "gpt-image-1, dall-e-3, dall-e-2",
                 }),

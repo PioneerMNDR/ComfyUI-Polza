@@ -13,9 +13,30 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .api import resolve_api_key, chat_completion, extract_response, PolzaAPIError
+from .api import resolve_api_key, chat_completion, extract_response, PolzaAPIError, get_model_options
 
 logger = logging.getLogger("PolzaAI")
+
+# Default fallback vision models (used if API is unreachable)
+DEFAULT_VISION_MODELS = [
+    ("openai/gpt-4o", "OpenAI GPT-4o"),
+    ("openai/gpt-4o-mini", "OpenAI GPT-4o Mini"),
+    ("anthropic/claude-sonnet-4-5-20250929", "Claude Sonnet 4"),
+    ("anthropic/claude-3-5-sonnet", "Claude 3.5 Sonnet"),
+    ("google/gemini-2.5-flash-preview", "Gemini 2.5 Flash"),
+]
+
+
+def get_vision_models() -> list:
+    """Load vision-capable models from API, fallback to defaults on error."""
+    try:
+        models = get_model_options(model_type="chat")
+        # Filter to only models that support image input
+        # For now, return all chat models as fallback since modality filtering requires more API data
+        return models[:50] if len(models) > 50 else models
+    except Exception as e:
+        logger.warning("Failed to fetch vision models from API: %s. Using defaults.", e)
+        return DEFAULT_VISION_MODELS
 
 
 def _tensor_to_data_uri(tensor: torch.Tensor) -> str:
@@ -65,7 +86,7 @@ class PolzaVision:
                     "default": "",
                     "tooltip": "API‑ключ (пусто → env / config.json)",
                 }),
-                "model": ("STRING", {
+                "model": (get_vision_models, {
                     "default": "openai/gpt-4o",
                     "tooltip": "Vision‑модель: openai/gpt-4o, anthropic/claude-sonnet-4-5-20250929, google/gemini-2.5-flash-preview …",
                 }),

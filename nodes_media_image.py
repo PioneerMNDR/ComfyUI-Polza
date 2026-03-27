@@ -28,11 +28,32 @@ from .api import (
     extract_usage_info,
     tensor_to_b64,
     PolzaAPIError,
+    get_model_options,
 )
 
 logger = logging.getLogger("PolzaAI")
 
 # ── Dropdown constants ────────────────────────────────────────────────
+
+# Default fallback media models (used if API is unreachable)
+DEFAULT_MEDIA_MODELS = [
+    ("seedream-3", "Seedream 3"),
+    ("seedream-4-5", "Seedream 4.5"),
+    ("nano-banana", "Nano Banana"),
+    ("gpt-image-1", "GPT Image 1"),
+    ("flux-1-1-ultra", "Flux 1.1 Ultra"),
+    ("grok-2-image", "Grok 2 Image"),
+]
+
+
+def get_media_models() -> list:
+    """Load image media models from API, fallback to defaults on error."""
+    try:
+        return get_model_options(model_type="image")
+    except Exception as e:
+        logger.warning("Failed to fetch media models from API: %s. Using defaults.", e)
+        return DEFAULT_MEDIA_MODELS
+
 
 ASPECT_RATIOS = [
     "1:1", "16:9", "9:16",
@@ -74,7 +95,7 @@ class PolzaMediaImage:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("STRING", {
+                "model": (get_media_models, {
                     "default": "seedream-3",
                     "tooltip": (
                         "ID модели: seedream-3, seedream-4-5, nano-banana, "

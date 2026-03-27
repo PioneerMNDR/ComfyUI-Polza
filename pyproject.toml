@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-polza"
-description = "Пакет нод для ComfyUI, предоставляющий доступ к 300+ AI-моделям через единый API Polza.ai"
-version = "1.0.0"
+description = "A ComfyUI nodes package providing access to 300+ AI models through a unified Polza.ai API"
+version = "1.0.3"
 license = { file = "LICENSE.txt" }
 dependencies = [
     "requests>=2.28.0",
@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/polza/ComfyUI-Polza"
+Repository = "https://github.com/PioneerMNDR/ComfyUI-Polza"
 
 [tool.comfy]
 PublisherId = "pioneermndr"  # ID с сайта Registry https://comfyregistry.com

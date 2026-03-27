@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Tuple
 
-from .api import resolve_api_key, chat_completion, extract_response, PolzaAPIError
+from .api import resolve_api_key, chat_completion, extract_response, PolzaAPIError, get_model_options
 
 logger = logging.getLogger("PolzaAI")
 
@@ -16,6 +16,26 @@ logger = logging.getLogger("PolzaAI")
 
 REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"]
 RESPONSE_FORMATS  = ["text", "json_object"]
+
+# Default fallback models (used if API is unreachable)
+DEFAULT_MODELS = [
+    ("openai/gpt-4o", "OpenAI GPT-4o"),
+    ("openai/gpt-4o-mini", "OpenAI GPT-4o Mini"),
+    ("anthropic/claude-sonnet-4-5-20250929", "Claude Sonnet 4"),
+    ("anthropic/claude-3-5-sonnet", "Claude 3.5 Sonnet"),
+    ("google/gemini-2.5-flash-preview", "Gemini 2.5 Flash"),
+    ("deepseek/deepseek-chat", "DeepSeek Chat"),
+    ("deepseek/deepseek-r1", "DeepSeek R1"),
+]
+
+
+def get_chat_models() -> list:
+    """Load chat models from API, fallback to defaults on error."""
+    try:
+        return get_model_options(model_type="chat")
+    except Exception as e:
+        logger.warning("Failed to fetch chat models from API: %s. Using defaults.", e)
+        return DEFAULT_MODELS
 
 
 class PolzaChat:
@@ -49,7 +69,7 @@ class PolzaChat:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("STRING", {
+                "model": (get_chat_models, {
                     "default": "openai/gpt-4o",
                     "tooltip": (
                         "ID модели: openai/gpt-4o, anthropic/claude-sonnet-4-5-20250929, "

@@ -392,3 +392,60 @@ def _log_usage(data: dict):
     cost = float(usage.get("cost_rub", 0) or usage.get("cost", 0) or 0)
     tokens = usage.get("total_tokens", "—")
     logger.info("Polza.ai ✅  tokens=%s  cost=%.4f ₽", tokens, cost)
+
+
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  Models List   GET /v1/models                                     ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+
+def get_models(model_type: str | None = None, include_providers: bool = False) -> List[dict]:
+    """
+    Fetch available models from Polza.ai API.
+    
+    Args:
+        model_type: Filter by type (chat, image, embedding, video, audio)
+        include_providers: Include provider details for each model
+        
+    Returns:
+        List of model dictionaries with id, name, type, architecture, etc.
+    """
+    params = {}
+    if model_type:
+        params["type"] = model_type
+    if include_providers:
+        params["include_providers"] = "true"
+    
+    url = f"{API_BASE}/v1/models"
+    logger.info("Fetching models from %s with params %s", url, params)
+    
+    try:
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("data", [])
+    except requests.exceptions.Timeout:
+        raise PolzaAPIError(408, "Таймаут при получении списка моделей")
+    except requests.exceptions.ConnectionError:
+        raise PolzaAPIError(503, "Нет соединения с polza.ai")
+    except Exception as exc:
+        logger.error("Error fetching models: %s", exc)
+        raise PolzaAPIError(500, f"Ошибка получения моделей: {exc}")
+
+
+def get_model_options(model_type: str | None = None) -> List[Tuple[str, str]]:
+    """
+    Get model options for ComfyUI dropdown.
+    
+    Returns list of (model_id, display_name) tuples.
+    """
+    models = get_models(model_type=model_type)
+    
+    options = []
+    for model in models:
+        model_id = model.get("id", "")
+        model_name = model.get("name", model_id)
+        options.append((model_id, model_name))
+    
+    # Sort alphabetically by display name
+    options.sort(key=lambda x: x[1].lower())
+    return options
