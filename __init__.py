@@ -21,7 +21,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PolzaChat":        "💬 Polza Chat",
     "PolzaVision":      "👁️ Polza Vision",
     "PolzaTextToImage": "🎨 Polza Text‑to‑Image",
-    "PolzaMedia": "🎬 Polza.ai Media",
+    "PolzaMedia":        "🎬 Polza Media",
     "PolzaShowText":    "📝 Polza Show Text",
 }
 

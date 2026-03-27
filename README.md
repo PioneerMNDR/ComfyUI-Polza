@@ -11,7 +11,7 @@
 | 💬 **Polza Chat** | Chat Completions — GPT-4o, Claude, Gemini, DeepSeek и сотни других |
 | 👁️ **Polza Vision** | Мультимодальный анализ изображений (image + text → text) |
 | 🎨 **Polza Text‑to‑Image** | OpenAI-совместимая генерация: gpt-image-1, DALL·E 3/2 |
-| 🖼️ **Polza Media Image** | Продвинутая генерация: Seedream, Nano Banana, Flux, Grok и др. + img2img |
+| 🖼️ **Polza Media Image** | 🖼️ Изображения · 🎬 Видео · 🔊 Аудио (TTS) · 🎵 Музыка |
 | 📝 **Polza Show Text** | Утилита для отображения текста прямо в графе |
 
 ## Установка
@@ -59,7 +59,7 @@ pip install -r requirements.txt
 [Preview Image]
 ```
 
-### 🖼️ Media Image (продвинутый)
+### 🖼️ Media Image (изображения)
 
 ```
 [🖼️ Polza Media Image]
@@ -70,6 +70,30 @@ pip install -r requirements.txt
   image_resolution: 2K
       ↓ images
 [Save Image]
+```
+
+### 🎬 Media Image (видео)
+
+```
+[🖼️ Polza Media Image]
+  model: veo-3-1
+  prompt: "Астронавт на Марсе"
+  duration: 10s
+  video_resolution: 1080p
+      ↓ media_url
+[Download Video]
+```
+
+### 🔊 Media Image (TTS)
+
+```
+[🖼️ Polza Media Image]
+  model: elevenlabs-tts-turbo
+  prompt: "Привет! Добро пожаловать в Polza AI."
+  voice: Rachel
+  speed: 1.0
+      ↓ media_url
+[Download Audio]
 ```
 
 ### 🖼️ Image-to-Image
@@ -119,16 +143,30 @@ pip install -r requirements.txt
 | Google | gemini-2.5-pro, gemini-2.5-flash |
 | DeepSeek | deepseek-chat, deepseek-reasoner |
 
-### Изображения
-| Модель | Нода | Описание |
-|---|---|---|
-| gpt-image-1 | 🎨 / 🖼️ | GPT Image (OpenAI) |
-| dall-e-3 | 🎨 | DALL·E 3 (OpenAI) |
-| seedream-3 | 🖼️ | Seedream 3 (ByteDance) |
-| seedream-4-5 | 🖼️ | Seedream 4.5 |
-| nano-banana | 🖼️ | Nano Banana |
-| flux-1-1-ultra | 🖼️ | Flux Ultra |
-| grok-2-image | 🖼️ | Grok Imagine (xAI) |
+### 🖼️ Изображения (Polza Media Image)
+| Модель | Описание |
+|---|---|
+| seedream-3 | Seedream 3 (ByteDance) |
+| seedream-4-5 | Seedream 4.5 |
+| nano-banana | Nano Banana |
+| gpt-image-1 | GPT Image (OpenAI) |
+| flux-1-1-ultra | Flux Ultra |
+| grok-2-image | Grok Imagine (xAI) |
+
+### 🎬 Видео (Polza Media Image)
+| Модель | Описание |
+|---|---|
+| veo-3 | Veo 3 (Google) |
+| veo-3-1 | Veo 3.1 |
+| wan-2-6 | Wan 2.6 |
+| kling-3-0 | Kling 3.0 |
+| seedance-1-0 | Seedance |
+| sora | Sora (OpenAI) |
+
+### 🔊 Аудио / TTS (Polza Media Image)
+| Модель | Описание |
+|---|---|
+| elevenlabs-tts-turbo | ElevenLabs TTS Turbo |
 
 Полный список: [polza.ai/models](https://polza.ai/models)
 
