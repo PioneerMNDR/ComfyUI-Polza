@@ -131,7 +131,7 @@ AUDIO_EXTENSIONS = (".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a")
 
 # ── Model type detection ───────────────────────────────────────
 VIDEO_MODEL_PREFIXES = ["kling", "veo", "wan", "sora", "seedance", "minimax", "luma"]
-AUDIO_MODEL_PREFIXES = ["elevenlabs", "tts", "stt", "whisper"]
+AUDIO_MODEL_PREFIXES = ["elevenlabs", "tts", "stt", "whisper", "gpt-audio", "audio"]
 
 
 def _is_video_model(model: str) -> bool:
@@ -147,7 +147,7 @@ def _is_audio_model(model: str) -> bool:
 
 
 def _get_video_model_type(model: str) -> str:
-    """Возвращает тип видео-модели для правильного форматирования параметров."""
+    """Возвращает тип модели для правильного форматирования параметров."""
     model_lower = model.lower()
     if "kling" in model_lower:
         return "kling"
@@ -159,7 +159,9 @@ def _get_video_model_type(model: str) -> str:
         return "sora"
     elif "seedance" in model_lower:
         return "seedance"
-    return "unknown"
+    elif _is_audio_model(model):
+        return "audio"
+    return "image"
 
 
 def _build_video_input(
@@ -507,6 +509,9 @@ class PolzaMedia:
                 image=image,
                 strength=strength,
             )
+        elif model_type == "audio":
+            # Аудио-модель — только релевантные параметры
+            inp = {"prompt": prompt}
         else:
             # Изображение или аудио — общая логика
             inp = {"prompt": prompt}
@@ -674,12 +679,21 @@ class PolzaMedia:
         audio_output: Optional[dict] = None
         if audio_files:
             audio_path, audio_filename = audio_files[0]
-            audio_output = {
-                "filename": audio_filename,
-                "subfolder": "",
-                "type": "temp",
-            }
-            logger.info("PolzaMedia: audio output ready: %s", audio_filename)
+            try:
+                import torchaudio
+                waveform, sample_rate = torchaudio.load(audio_path)
+                # torchaudio returns [channels, samples], ComfyUI expects [batch, channels, samples]
+                if waveform.dim() == 2:
+                    waveform = waveform.unsqueeze(0)
+                audio_output = {"waveform": waveform, "sample_rate": sample_rate}
+                logger.info("PolzaMedia: audio loaded: %s (%d Hz, %.1fs)",
+                           audio_filename, sample_rate, waveform.shape[-1] / sample_rate)
+            except ImportError:
+                logger.warning("PolzaMedia: torchaudio not available, audio output will be None")
+                audio_output = None
+            except Exception as exc:
+                logger.warning("PolzaMedia: failed to load audio %s: %s", audio_path, exc)
+                audio_output = None
 
         # ── 10. Validate we got something ────────────────────────
         if not pil_images and not video_filepath and not audio_files and not text_response:
@@ -743,7 +757,7 @@ class PolzaMedia:
     def _error(msg: str) -> dict:
         logger.error("PolzaMedia: %s", msg)
         blank = torch.zeros(1, 64, 64, 3, dtype=torch.float32)
-        # Create a minimal valid VIDEO from the blank image so SaveVideo doesn't crash
+        # Create a minimal valid VIDEO from the blank image
         video_blank = None
         if _HAS_NATIVE_VIDEO and InputImpl is not None and Types is not None:
             try:
@@ -757,7 +771,9 @@ class PolzaMedia:
                 )
             except Exception as exc:
                 logger.warning("PolzaMedia: failed to create blank video: %s", exc)
+        # Create minimal silent audio so PreviewAudio doesn't crash
+        audio_blank = {"waveform": torch.zeros(1, 1, 16000), "sample_rate": 16000}
         return {
             "ui":     {"text": [msg]},
-            "result": (blank, video_blank, None, "", "", "", 0.0),
+            "result": (blank, video_blank, audio_blank, "", "", "", 0.0),
         }
