@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import List
 
 import torch
@@ -65,11 +66,6 @@ _cached_all_models: list[str] | None = None
 
 
 def _get_all_media_models() -> list[str]:
-    """Fetch image + video + audio models from the API; fall back to defaults.
-
-    Result is cached after the first successful (or failed) attempt so that
-    ComfyUI startup is never blocked by a slow/unavailable network.
-    """
     global _cached_all_models
     if _cached_all_models is not None:
         return _cached_all_models
@@ -78,7 +74,7 @@ def _get_all_media_models() -> list[str]:
     for model_type in ("image", "video", "audio"):
         try:
             collected.update(get_model_options(model_type=model_type))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Failed to fetch %s models: %s", model_type, exc)
 
     _cached_all_models = (
@@ -109,10 +105,7 @@ VIDEO_RESOLUTIONS  = ["auto", "480p", "580p", "720p", "1080p"]
 # ╚═══════════════════════════════════════════════════════════════════╝
 
 def _extract_media_urls(data: dict) -> List[str]:
-    """Pull every ``url`` value out of the ``data`` field of a response.
-
-    Works regardless of whether ``data`` is a single dict or a list of dicts.
-    """
+    """Pull every ``url`` out of the ``data`` field of a response."""
     raw = data.get("data")
     if raw is None:
         return []
@@ -121,13 +114,25 @@ def _extract_media_urls(data: dict) -> List[str]:
 
 
 def _url_media_kind(url: str) -> str:
-    """Guess 🎬/🔊/📎 prefix from a URL extension."""
     lo = url.lower()
     if any(ext in lo for ext in (".mp4", ".webm", ".mov", ".avi")):
         return "🎬 Video"
     if any(ext in lo for ext in (".mp3", ".wav", ".ogg", ".flac", ".aac")):
         return "🔊 Audio"
     return "📎 File"
+
+
+def _safe_tensor_to_b64(tensor: torch.Tensor, fmt: str = "PNG") -> str:
+    """Encode a single-frame IMAGE tensor to base64.
+
+    Accepts both [H, W, C] and [1, H, W, C] and always passes
+    a properly-shaped [1, H, W, C] tensor to ``tensor_to_b64``.
+    """
+    if tensor.dim() == 3:
+        tensor = tensor.unsqueeze(0)          # [H,W,C] → [1,H,W,C]
+    elif tensor.dim() == 4 and tensor.shape[0] != 1:
+        tensor = tensor[:1]                   # take first frame only
+    return tensor_to_b64(tensor, fmt=fmt)
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -150,7 +155,6 @@ class PolzaMedia:
     FUNCTION    = "execute"
     OUTPUT_NODE = True
 
-    # -- outputs --
     RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING", "FLOAT")
     RETURN_NAMES = ("images", "media_url", "media_id", "text_response", "cost_rub")
 
@@ -165,7 +169,7 @@ class PolzaMedia:
     # ── Inputs ────────────────────────────────────────────────────
 
     @classmethod
-    def INPUT_TYPES(cls):  # noqa: N802
+    def INPUT_TYPES(cls):
         return {
             "required": {
                 "model": (_get_all_media_models(), {
@@ -185,13 +189,10 @@ class PolzaMedia:
                 }),
             },
             "optional": {
-                # ── Auth ────────────────────────────────────────
                 "api_key": ("STRING", {
                     "default": "",
                     "tooltip": "API‑ключ Polza.ai (пусто → env POLZA_API_KEY / config.json)",
                 }),
-
-                # ── Reference media ─────────────────────────────
                 "image": ("IMAGE", {
                     "tooltip": (
                         "Входное изображение для img2img / img2vid / editing.\n"
@@ -203,8 +204,6 @@ class PolzaMedia:
                     "default": "",
                     "tooltip": "URL видео для video-to-video генерации.",
                 }),
-
-                # ── Common ──────────────────────────────────────
                 "aspect_ratio": (ASPECT_RATIOS, {
                     "default": "auto",
                     "tooltip": "Соотношение сторон (изображения / видео).",
@@ -215,8 +214,6 @@ class PolzaMedia:
                     "max": 2_147_483_647,
                     "tooltip": "Seed для воспроизводимости (0 = случайный).",
                 }),
-
-                # ── Image ───────────────────────────────────────
                 "quality": (QUALITIES, {
                     "default": "auto",
                     "tooltip": "Качество изображения (auto = default модели).",
@@ -256,8 +253,6 @@ class PolzaMedia:
                     "default": True,
                     "tooltip": "Проверка безопасности контента.",
                 }),
-
-                # ── Video ───────────────────────────────────────
                 "duration": (DURATIONS, {
                     "default": "auto",
                     "tooltip": "Длительность видео.",
@@ -270,8 +265,6 @@ class PolzaMedia:
                     "default": False,
                     "tooltip": "Генерация звука в видео (Kling 2.6 / 3.0).",
                 }),
-
-                # ── Audio / TTS ─────────────────────────────────
                 "voice": ("STRING", {
                     "default": "",
                     "tooltip": "Голос для TTS (напр. Rachel, Josh).",
@@ -287,8 +280,6 @@ class PolzaMedia:
                     "default": "",
                     "tooltip": "Код языка ISO 639‑1 (напр. ru, en). Только Turbo 2.5.",
                 }),
-
-                # ── Advanced ────────────────────────────────────
                 "extra_params_json": ("STRING", {
                     "default": "",
                     "multiline": True,
@@ -302,19 +293,16 @@ class PolzaMedia:
             },
         }
 
-    # ── Always re-execute ─────────────────────────────────────────
-
     @classmethod
-    def IS_CHANGED(cls, **_kwargs):  # noqa: N802
+    def IS_CHANGED(cls, **_kwargs):
         return float("nan")
 
     # ── Main ──────────────────────────────────────────────────────
 
-    def execute(  # noqa: C901, PLR0912, PLR0913, PLR0915
+    def execute(
         self,
         model: str,
         prompt: str,
-        # optional ↓
         api_key: str = "",
         image: torch.Tensor | None = None,
         video_url: str = "",
@@ -336,6 +324,10 @@ class PolzaMedia:
         language_code: str = "",
         extra_params_json: str = "",
     ) -> dict:
+
+        t0 = time.time()
+        logger.info("PolzaMedia: execute start  model=%s", model)
+
         # ── 1. API key ──────────────────────────────────────────
         try:
             key = resolve_api_key(api_key)
@@ -348,13 +340,10 @@ class PolzaMedia:
         # ── 2. Build input dict (only non-default values) ────────
         inp: dict = {"prompt": prompt}
 
-        # -- common ---------------------------------------------------
         if aspect_ratio != "auto":
             inp["aspect_ratio"] = aspect_ratio
         if seed > 0:
             inp["seed"] = seed
-
-        # -- image ----------------------------------------------------
         if quality != "auto":
             inp["quality"] = quality
         if image_resolution != "auto":
@@ -369,8 +358,6 @@ class PolzaMedia:
             inp["isEnhance"] = True
         if not enable_safety:
             inp["enable_safety_checker"] = False
-
-        # -- video ----------------------------------------------------
         if duration != "auto":
             inp["duration"] = duration
         if video_resolution != "auto":
@@ -379,8 +366,6 @@ class PolzaMedia:
             inp["sound"] = True
         if video_url.strip():
             inp["videos"] = [{"type": "url", "data": video_url.strip()}]
-
-        # -- audio / tts ----------------------------------------------
         if voice.strip():
             inp["voice"] = voice.strip()
         if speed != 1.0:
@@ -391,19 +376,31 @@ class PolzaMedia:
         # ── 3. Encode batch IMAGE input ──────────────────────────
         if image is not None:
             img_4d = image if image.dim() == 4 else image.unsqueeze(0)
+            batch_count = img_4d.shape[0]
             encoded: list[dict] = []
-            for i in range(img_4d.shape[0]):
-                b64 = tensor_to_b64(img_4d[i], fmt="PNG")
+
+            logger.info(
+                "PolzaMedia: encoding %d frame(s) from tensor %s",
+                batch_count, list(img_4d.shape),
+            )
+
+            for i in range(batch_count):
+                frame = img_4d[i]                             # [H, W, C]
+                b64 = _safe_tensor_to_b64(frame, fmt="PNG")   # ← fixed helper
                 encoded.append({
                     "type": "base64",
                     "data": f"data:image/png;base64,{b64}",
                 })
+                logger.debug(
+                    "  frame %d: b64 length=%d chars", i, len(b64),
+                )
+
             inp["images"] = encoded
             inp["strength"] = strength
             logger.info(
-                "PolzaMedia: attached %d image(s) from batch tensor %s",
+                "PolzaMedia: attached %d image(s), b64 total ≈%.1f KB",
                 len(encoded),
-                list(image.shape),
+                sum(len(e["data"]) for e in encoded) / 1024,
             )
 
         # ── 4. Merge extra JSON params ───────────────────────────
@@ -414,38 +411,90 @@ class PolzaMedia:
                 return self._error(f"❌ Невалидный JSON в extra_params_json: {exc}")
             if not isinstance(extra, dict):
                 return self._error(
-                    "❌ extra_params_json должен быть JSON-объектом { }, а не массивом/скаляром"
+                    "❌ extra_params_json должен быть JSON-объектом {}, а не массивом/скаляром"
                 )
             inp.update(extra)
+            logger.info("PolzaMedia: merged extra keys: %s", list(extra.keys()))
 
-        # ── 5. Call Media API ────────────────────────────────────
+        # ── 5. Log final payload (without base64 blobs) ──────────
+        log_inp = {
+            k: (f"<{len(v)} items>" if k == "images" else v)
+            for k, v in inp.items()
+        }
+        logger.info("PolzaMedia: calling media_create  model=%s  input=%s", model, log_inp)
+
+        # ── 6. Call Media API ────────────────────────────────────
         try:
             data = media_create(key, model=model, input=inp)
         except PolzaAPIError as exc:
-            return self._error(f"❌ API: {exc}")
+            logger.error("PolzaMedia: API error → %s", exc)
+            return self._error(f"❌ API [{exc.status_code}]: {exc.message}")
         except Exception as exc:
-            logger.exception("PolzaMedia unexpected error")
-            return self._error(f"❌ {exc}")
+            logger.exception("PolzaMedia: unexpected error during media_create")
+            return self._error(f"❌ Unexpected: {exc}")
 
-        # ── 6. Parse response ────────────────────────────────────
-        #   images → tensor;  any media → url list
-        pil_images   = images_from_generation(data)
-        batch_tensor = (
-            images_to_batch_tensor(pil_images)
-            if pil_images
-            else torch.zeros(1, 64, 64, 3, dtype=torch.float32)
+        elapsed = time.time() - t0
+        status = data.get("status", "?")
+        logger.info(
+            "PolzaMedia: response received  status=%s  id=%s  elapsed=%.1fs",
+            status, data.get("id", "?"), elapsed,
         )
 
-        media_urls = _extract_media_urls(data)
-        media_url  = "\n".join(media_urls)
-        media_id   = data.get("id", "")
+        # ── 7. Log full response (debug level, for diagnostics) ──
+        logger.debug("PolzaMedia: full response → %s", json.dumps(data, default=str)[:2000])
 
+        # ── 8. Check for API-level failure ───────────────────────
+        if status == "failed":
+            err_obj = data.get("error", {})
+            err_msg = (
+                err_obj.get("message", "Неизвестная ошибка")
+                if isinstance(err_obj, dict)
+                else str(err_obj)
+            )
+            logger.error("PolzaMedia: generation failed → %s", err_msg)
+            return self._error(f"❌ Генерация не удалась: {err_msg}")
+
+        # ── 9. Parse response ────────────────────────────────────
+        pil_images   = images_from_generation(data)
+        media_urls   = _extract_media_urls(data)
+        media_url    = "\n".join(media_urls)
+        media_id     = data.get("id", "")
         text_response = data.get("content", "") or ""
         reasoning     = data.get("reasoning_summary", "") or ""
         cost_rub, usage_summary = extract_usage_info(data)
         warnings = data.get("warnings") or []
 
-        # ── 7. UI feedback lines ─────────────────────────────────
+        logger.info(
+            "PolzaMedia: parsed → %d PIL images, %d media URLs, "
+            "text=%d chars, cost=%.4f₽, elapsed=%.1fs",
+            len(pil_images), len(media_urls),
+            len(text_response), cost_rub, elapsed,
+        )
+
+        # ── 10. Build image tensor ───────────────────────────────
+        if pil_images:
+            batch_tensor = images_to_batch_tensor(pil_images)
+            logger.info(
+                "PolzaMedia: image tensor shape=%s", list(batch_tensor.shape),
+            )
+        else:
+            batch_tensor = torch.zeros(1, 64, 64, 3, dtype=torch.float32)
+            if not media_urls and not text_response:
+                logger.warning(
+                    "PolzaMedia: no images, no media URLs, no text in response!"
+                )
+                logger.warning(
+                    "PolzaMedia: response keys=%s  data field=%s",
+                    list(data.keys()),
+                    repr(data.get("data"))[:500],
+                )
+                return self._error(
+                    "❌ API не вернул ни изображений, ни URL, ни текста.\n"
+                    f"status={status}  id={media_id}\n"
+                    f"Response keys: {list(data.keys())}"
+                )
+
+        # ── 11. UI feedback lines ────────────────────────────────
         ui: list[str] = []
 
         if pil_images:
@@ -453,11 +502,8 @@ class PolzaMedia:
             h, w = batch_tensor.shape[1], batch_tensor.shape[2]
             ui.append(f"✅ {n} image{'s' if n > 1 else ''} · {w}×{h}")
 
-        # URLs for non-image media (video / audio) — or image URLs
-        # when PIL decoding failed (e.g. WEBP from CDN)
         for url in media_urls:
             kind = _url_media_kind(url)
-            # Don't duplicate image URLs already shown above
             if pil_images and kind == "📎 File":
                 continue
             ui.append(f"{kind}: {url}")
@@ -465,6 +511,7 @@ class PolzaMedia:
         if media_id:
             ui.append(f"🆔 {media_id}")
         ui.append(f"📊 {usage_summary}")
+        ui.append(f"⏱ {elapsed:.1f}s")
 
         if reasoning:
             ui.append(f"💭 {reasoning[:200]}")
@@ -476,6 +523,10 @@ class PolzaMedia:
         if not ui:
             ui.append("✅ Генерация завершена")
 
+        # ── log the same info to console ─────────────────────────
+        for line in ui:
+            logger.info("PolzaMedia UI: %s", line)
+
         return {
             "ui":     {"text": ui},
             "result": (batch_tensor, media_url, media_id, text_response, cost_rub),
@@ -485,6 +536,7 @@ class PolzaMedia:
 
     @staticmethod
     def _error(msg: str) -> dict:
+        logger.error("PolzaMedia: %s", msg)                   # ← ВСЕГДА в консоль
         blank = torch.zeros(1, 64, 64, 3, dtype=torch.float32)
         return {
             "ui":     {"text": [msg]},
