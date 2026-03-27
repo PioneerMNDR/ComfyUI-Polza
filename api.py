@@ -34,6 +34,7 @@ REQUEST_TIMEOUT = 180          # single HTTP request timeout (seconds)
 POLL_TIMEOUT    = 600          # max total wait for async generation
 POLL_INTERVAL   = 4            # seconds between status checks
 IMAGE_DOWNLOAD_TIMEOUT = 60
+MEDIA_DOWNLOAD_TIMEOUT = 300   # video/audio files can be large
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -152,6 +153,36 @@ def _get(api_key: str, path: str, timeout: int = 30) -> dict:
         raise PolzaAPIError(resp.status_code, msg)
 
     return resp.json()
+
+
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  Media file download                                             ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+
+def download_media_file(url: str, filepath: str, timeout: int = MEDIA_DOWNLOAD_TIMEOUT) -> str:
+    """
+    Download a media file (video/audio) from URL to local filepath.
+
+    Uses streaming download to handle large files efficiently.
+    Returns the filepath on success.
+
+    Raises:
+        requests.HTTPError: if the download fails
+    """
+    logger.info("Downloading media: %s → %s", url, filepath)
+
+    resp = requests.get(url, timeout=timeout, stream=True)
+    resp.raise_for_status()
+
+    total_bytes = 0
+    with open(filepath, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+                total_bytes += len(chunk)
+
+    logger.info("Downloaded %d bytes to %s", total_bytes, filepath)
+    return filepath
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -344,9 +375,15 @@ def images_from_generation(data: dict) -> List[Image.Image]:
             images.append(b64_to_pil(b64))
             continue
 
-        # ── url ──────────────────────────────────────────────────
+        # ── url (only image URLs, skip video/audio) ──────────────
         url = item.get("url")
         if url:
+            # Skip video and audio URLs — they're handled separately
+            lo = url.lower().split("?")[0]
+            video_exts = (".mp4", ".webm", ".mov", ".avi", ".mkv")
+            audio_exts = (".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a")
+            if any(lo.endswith(ext) for ext in video_exts + audio_exts):
+                continue
             try:
                 images.append(download_image(url))
             except Exception as exc:
@@ -410,11 +447,11 @@ def _log_usage(data: dict):
 def get_models(model_type: str | None = None, include_providers: bool = False) -> List[dict]:
     """
     Fetch available models from Polza.ai API.
-    
+
     Args:
         model_type: Filter by type (chat, image, embedding, video, audio)
         include_providers: Include provider details for each model
-        
+
     Returns:
         List of model dictionaries with id, name, type, architecture, etc.
     """
@@ -423,10 +460,10 @@ def get_models(model_type: str | None = None, include_providers: bool = False) -
         params["type"] = model_type
     if include_providers:
         params["include_providers"] = "true"
-    
+
     url = f"{API_BASE}/v1/models"
     logger.info("Fetching models from %s with params %s", url, params)
-    
+
     try:
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
@@ -447,7 +484,7 @@ def get_model_options(model_type: str | None = None) -> List[str]:
     Returns list of model ID strings.
     """
     models = get_models(model_type=model_type)
-    
+
     options = [m.get("id", "") for m in models if m.get("id")]
     options.sort(key=str.lower)
     return options

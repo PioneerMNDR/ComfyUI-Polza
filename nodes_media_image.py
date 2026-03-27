@@ -9,7 +9,7 @@ Supports ALL Polza.ai media models through a single node:
 
 Features:
   • Text-to-Image / Image-to-Image  (batch via ComfyUI Batch Images)
-  • Text-to-Video / Image-to-Video
+  • Text-to-Video / Image-to-Video  (native VIDEO output)
   • Text-to-Speech (TTS)
   • Music generation
   • Async generation with automatic polling
@@ -20,13 +20,28 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+import uuid
 from typing import List
 
 import torch
 
+try:
+    import folder_paths
+except ImportError:
+    import sys
+    # folder_paths is a ComfyUI built-in module; provide a dummy for static analysis
+    class _FolderPathsDummy:
+        @staticmethod
+        def get_output_directory():
+            return "./output"
+    folder_paths = _FolderPathsDummy()
+    sys.modules["folder_paths"] = folder_paths
+
 from .api import (
     PolzaAPIError,
+    download_media_file,
     extract_usage_info,
     get_model_options,
     images_from_generation,
@@ -101,8 +116,23 @@ VIDEO_RESOLUTIONS  = ["auto", "480p", "580p", "720p", "1080p"]
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
-# ║  Local helpers                                                   ║
+# ║  Video output helper                                             ║
 # ╚═══════════════════════════════════════════════════════════════════╝
+
+# Video file extensions we recognize
+VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
+AUDIO_EXTENSIONS = (".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a")
+
+
+def _classify_url(url: str) -> str:
+    """Classify a media URL as 'video', 'audio', or 'image'."""
+    lo = url.lower().split("?")[0]  # strip query params
+    if any(lo.endswith(ext) for ext in VIDEO_EXTENSIONS):
+        return "video"
+    if any(lo.endswith(ext) for ext in AUDIO_EXTENSIONS):
+        return "audio"
+    return "image"
+
 
 def _extract_media_urls(data: dict) -> List[str]:
     """Pull every ``url`` out of the ``data`` field of a response."""
@@ -113,13 +143,82 @@ def _extract_media_urls(data: dict) -> List[str]:
     return [item["url"] for item in items if isinstance(item, dict) and item.get("url")]
 
 
+def _save_video_to_output(url: str, api_key: str = "") -> dict:
+    """
+    Download a video URL and save it to ComfyUI's output directory.
+
+    Returns a dict compatible with ComfyUI's video preview system:
+        {"filename": ..., "subfolder": ..., "type": "output"}
+    """
+    # Determine file extension from URL
+    lo = url.lower().split("?")[0]
+    ext = ".mp4"  # default
+    for candidate in VIDEO_EXTENSIONS:
+        if lo.endswith(candidate):
+            ext = candidate
+            break
+
+    # Generate unique filename
+    filename = f"polza_video_{uuid.uuid4().hex[:12]}{ext}"
+    subfolder = "polza_videos"
+
+    # Ensure subfolder exists in output directory
+    output_dir = folder_paths.get_output_directory()
+    video_dir = os.path.join(output_dir, subfolder)
+    os.makedirs(video_dir, exist_ok=True)
+
+    filepath = os.path.join(video_dir, filename)
+
+    # Download the video
+    logger.info("PolzaMedia: downloading video to %s", filepath)
+    download_media_file(url, filepath)
+    logger.info("PolzaMedia: video saved (%d bytes)", os.path.getsize(filepath))
+
+    return {
+        "filename": filename,
+        "subfolder": subfolder,
+        "type": "output",
+    }
+
+
+def _save_audio_to_output(url: str, api_key: str = "") -> dict:
+    """
+    Download an audio URL and save it to ComfyUI's output directory.
+    """
+    lo = url.lower().split("?")[0]
+    ext = ".mp3"
+    for candidate in AUDIO_EXTENSIONS:
+        if lo.endswith(candidate):
+            ext = candidate
+            break
+
+    filename = f"polza_audio_{uuid.uuid4().hex[:12]}{ext}"
+    subfolder = "polza_audio"
+
+    output_dir = folder_paths.get_output_directory()
+    audio_dir = os.path.join(output_dir, subfolder)
+    os.makedirs(audio_dir, exist_ok=True)
+
+    filepath = os.path.join(audio_dir, filename)
+
+    logger.info("PolzaMedia: downloading audio to %s", filepath)
+    download_media_file(url, filepath)
+    logger.info("PolzaMedia: audio saved (%d bytes)", os.path.getsize(filepath))
+
+    return {
+        "filename": filename,
+        "subfolder": subfolder,
+        "type": "output",
+    }
+
+
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  Local helpers                                                   ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+
 def _url_media_kind(url: str) -> str:
-    lo = url.lower()
-    if any(ext in lo for ext in (".mp4", ".webm", ".mov", ".avi")):
-        return "🎬 Video"
-    if any(ext in lo for ext in (".mp3", ".wav", ".ogg", ".flac", ".aac")):
-        return "🔊 Audio"
-    return "📎 File"
+    kind = _classify_url(url)
+    return {"video": "🎬 Video", "audio": "🔊 Audio"}.get(kind, "📎 File")
 
 
 def _safe_tensor_to_b64(tensor: torch.Tensor, fmt: str = "PNG") -> str:
@@ -143,6 +242,15 @@ class PolzaMedia:
     """
     Universal media generation via Polza.ai Media API ``/v1/media``.
 
+    Outputs:
+      • images  — IMAGE tensor for generated images (or empty 64×64 if none)
+      • video   — VIDEO output: downloaded video file for ComfyUI preview/playback
+      • audio   — AUDIO dict: downloaded audio file info
+      • media_url — raw URL string (for chaining or external use)
+      • media_id — generation task ID
+      • text_response — any text content from the response
+      • cost_rub — generation cost in rubles
+
     * Connect an **IMAGE** input for img2img / img2vid.
       Batch is fully supported — every frame in ``[B, H, W, 3]``
       becomes a separate element of the ``images[]`` array sent to the API.
@@ -155,12 +263,14 @@ class PolzaMedia:
     FUNCTION    = "execute"
     OUTPUT_NODE = True
 
-    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING", "FLOAT")
-    RETURN_NAMES = ("images", "media_url", "media_id", "text_response", "cost_rub")
+    # Native VIDEO output uses the "VIDEO" type which ComfyUI frontend
+    # knows how to preview. The format matches VHS / built-in video nodes.
+    RETURN_TYPES = ("IMAGE", "VHS_VIDEO", "STRING", "STRING", "STRING", "FLOAT")
+    RETURN_NAMES = ("images", "video", "media_url", "media_id", "text_response", "cost_rub")
 
     DESCRIPTION = (
         "Универсальная генерация медиа через Polza.ai Media API.\n\n"
-        "🖼️ Изображения · 🎬 Видео · 🔊 Аудио (TTS) · 🎵 Музыка\n\n"
+        "🖼️ Изображения · 🎬 Видео (нативный VIDEO выход) · 🔊 Аудио (TTS) · 🎵 Музыка\n\n"
         "Подключите IMAGE для img2img / img2vid.\n"
         "Для batch подключите через Batch Images (несколько фреймов → images[]).\n"
         "Любые параметры API — через extra_params_json."
@@ -455,10 +565,10 @@ class PolzaMedia:
             return self._error(f"❌ Генерация не удалась: {err_msg}")
 
         # ── 9. Parse response ────────────────────────────────────
-        pil_images   = images_from_generation(data)
-        media_urls   = _extract_media_urls(data)
-        media_url    = "\n".join(media_urls)
-        media_id     = data.get("id", "")
+        pil_images    = images_from_generation(data)
+        media_urls    = _extract_media_urls(data)
+        media_url_str = "\n".join(media_urls)
+        media_id      = data.get("id", "")
         text_response = data.get("content", "") or ""
         reasoning     = data.get("reasoning_summary", "") or ""
         cost_rub, usage_summary = extract_usage_info(data)
@@ -471,7 +581,28 @@ class PolzaMedia:
             len(text_response), cost_rub, elapsed,
         )
 
-        # ── 10. Build image tensor ───────────────────────────────
+        # ── 10. Classify media URLs and download video/audio ─────
+        video_results: list[dict] = []
+        audio_results: list[dict] = []
+
+        for url in media_urls:
+            kind = _classify_url(url)
+            if kind == "video":
+                try:
+                    video_info = _save_video_to_output(url)
+                    video_results.append(video_info)
+                    logger.info("PolzaMedia: saved video → %s", video_info["filename"])
+                except Exception as exc:
+                    logger.error("PolzaMedia: failed to download video %s: %s", url, exc)
+            elif kind == "audio":
+                try:
+                    audio_info = _save_audio_to_output(url)
+                    audio_results.append(audio_info)
+                    logger.info("PolzaMedia: saved audio → %s", audio_info["filename"])
+                except Exception as exc:
+                    logger.error("PolzaMedia: failed to download audio %s: %s", url, exc)
+
+        # ── 11. Build image tensor ───────────────────────────────
         if pil_images:
             batch_tensor = images_to_batch_tensor(pil_images)
             logger.info(
@@ -479,66 +610,98 @@ class PolzaMedia:
             )
         else:
             batch_tensor = torch.zeros(1, 64, 64, 3, dtype=torch.float32)
-            if not media_urls and not text_response:
-                logger.warning(
-                    "PolzaMedia: no images, no media URLs, no text in response!"
-                )
-                logger.warning(
-                    "PolzaMedia: response keys=%s  data field=%s",
-                    list(data.keys()),
-                    repr(data.get("data"))[:500],
-                )
-                return self._error(
-                    "❌ API не вернул ни изображений, ни URL, ни текста.\n"
-                    f"status={status}  id={media_id}\n"
-                    f"Response keys: {list(data.keys())}"
-                )
 
-        # ── 11. UI feedback lines ────────────────────────────────
-        ui: list[str] = []
+        # ── 12. Build video output ───────────────────────────────
+        # VHS_VIDEO format: tuple of (file_info_list,) or None
+        # The VHS (Video Helper Suite) standard expects:
+        #   (filenames: list[str], subfolder: str, type: str)
+        # But the most common format is just the file path info
+        if video_results:
+            # Return the first video in VHS-compatible format
+            vr = video_results[0]
+            video_output = {
+                "filename": vr["filename"],
+                "subfolder": vr["subfolder"],
+                "type": vr["type"],
+            }
+        else:
+            video_output = None
+
+        # ── 13. Check if we got anything ─────────────────────────
+        if not pil_images and not video_results and not audio_results and not text_response:
+            logger.warning(
+                "PolzaMedia: no images, no video, no audio, no text in response!"
+            )
+            logger.warning(
+                "PolzaMedia: response keys=%s  data field=%s",
+                list(data.keys()),
+                repr(data.get("data"))[:500],
+            )
+            return self._error(
+                "❌ API не вернул ни изображений, ни видео, ни аудио, ни текста.\n"
+                f"status={status}  id={media_id}\n"
+                f"Response keys: {list(data.keys())}"
+            )
+
+        # ── 14. UI feedback lines ────────────────────────────────
+        ui: dict = {"text": []}
+        ui_lines: list[str] = ui["text"]
 
         if pil_images:
             n = len(pil_images)
             h, w = batch_tensor.shape[1], batch_tensor.shape[2]
-            ui.append(f"✅ {n} image{'s' if n > 1 else ''} · {w}×{h}")
+            ui_lines.append(f"✅ {n} image{'s' if n > 1 else ''} · {w}×{h}")
 
-        for url in media_urls:
-            kind = _url_media_kind(url)
-            if pil_images and kind == "📎 File":
-                continue
-            ui.append(f"{kind}: {url}")
+        # Add video previews to UI
+        if video_results:
+            ui["videos"] = video_results
+            for vr in video_results:
+                ui_lines.append(f"🎬 Video: {vr['filename']}")
+
+        # Add audio info to UI
+        if audio_results:
+            ui["audio"] = audio_results
+            for ar in audio_results:
+                ui_lines.append(f"🔊 Audio: {ar['filename']}")
 
         if media_id:
-            ui.append(f"🆔 {media_id}")
-        ui.append(f"📊 {usage_summary}")
-        ui.append(f"⏱ {elapsed:.1f}s")
+            ui_lines.append(f"🆔 {media_id}")
+        ui_lines.append(f"📊 {usage_summary}")
+        ui_lines.append(f"⏱ {elapsed:.1f}s")
 
         if reasoning:
-            ui.append(f"💭 {reasoning[:200]}")
+            ui_lines.append(f"💭 {reasoning[:200]}")
         if text_response:
-            ui.append(f"📝 {text_response[:300]}")
+            ui_lines.append(f"📝 {text_response[:300]}")
         for warn in warnings:
-            ui.append(f"⚠️ {warn}")
+            ui_lines.append(f"⚠️ {warn}")
 
-        if not ui:
-            ui.append("✅ Генерация завершена")
+        if not ui_lines:
+            ui_lines.append("✅ Генерация завершена")
 
         # ── log the same info to console ─────────────────────────
-        for line in ui:
+        for line in ui_lines:
             logger.info("PolzaMedia UI: %s", line)
 
         return {
-            "ui":     {"text": ui},
-            "result": (batch_tensor, media_url, media_id, text_response, cost_rub),
+            "ui":     ui,
+            "result": (
+                batch_tensor,
+                video_output,
+                media_url_str,
+                media_id,
+                text_response,
+                cost_rub,
+            ),
         }
 
     # ── Error helper ─────────────────────────────────────────────
 
     @staticmethod
     def _error(msg: str) -> dict:
-        logger.error("PolzaMedia: %s", msg)                   # ← ВСЕГДА в консоль
+        logger.error("PolzaMedia: %s", msg)
         blank = torch.zeros(1, 64, 64, 3, dtype=torch.float32)
         return {
             "ui":     {"text": [msg]},
-            "result": (blank, "", "", "", 0.0),
+            "result": (blank, None, "", "", "", 0.0),
         }
