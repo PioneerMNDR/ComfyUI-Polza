@@ -69,6 +69,17 @@ except ImportError:
 logger = logging.getLogger("PolzaAI")
 
 
+def _truncate_for_log(value, max_len: int = 20) -> str:
+    """Обрезает значение для логов: строки → max_len символов, контейнеры → рекурсивно."""
+    if isinstance(value, str):
+        return value[:max_len] + ("…" if len(value) > max_len else "")
+    elif isinstance(value, dict):
+        return {k: _truncate_for_log(v, max_len) for k, v in value.items()}
+    elif isinstance(value, (list, tuple)):
+        return [_truncate_for_log(v, max_len) for v in value]
+    return value
+
+
 # ╔═══════════════════════════════════════════════════════════════════╗
 # ║  Model list                                                      ║
 # ╚═══════════════════════════════════════════════════════════════════╝
@@ -567,7 +578,7 @@ class PolzaMedia:
         logger.info(
             "PolzaMedia [%s]: %s",
             model_type,
-            json.dumps(inp, ensure_ascii=False)
+            json.dumps(_truncate_for_log(inp), ensure_ascii=False)
         )
         try:
             data = media_create(key, model=model, input=inp)
