@@ -1,0 +1,19 @@
+[project]
+name = "comfyui-polza"
+description = "Пакет нод для ComfyUI, предоставляющий доступ к 300+ AI-моделям через единый API Polza.ai"
+version = "1.0.0"
+license = { file = "LICENSE.txt" }
+dependencies = [
+    "requests>=2.28.0",
+    "Pillow>=9.0.0",
+    "numpy",
+    "torch",
+]
+
+[project.urls]
+Repository = "https://github.com/polza/ComfyUI-Polza"
+
+[tool.comfy]
+PublisherId = "pioneermndr"  # ID с сайта Registry https://comfyregistry.com
+DisplayName = "Polza AI Nodes"
+Icon = ""  # SVG, PNG, JPG или GIF — ссылка на иконку

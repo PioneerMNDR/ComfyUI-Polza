@@ -18,14 +18,14 @@
 
 ### Через ComfyUI Manager
 1. Откройте **ComfyUI Manager** → **Install Custom Nodes**
-2. Найдите **comfyui-polza-ai**
+2. Найдите **ComfyUI-Polza**
 3. Установите и перезапустите ComfyUI
 
 ### Вручную
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/your-name/comfyui-polza-ai.git
-cd comfyui-polza-ai
+git clone https://github.com/your-name/ComfyUI-Polza.git
+cd ComfyUI-Polza
 pip install -r requirements.txt
 ```
 
