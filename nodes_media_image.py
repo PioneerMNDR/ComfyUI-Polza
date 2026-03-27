@@ -46,13 +46,25 @@ DEFAULT_MEDIA_MODELS = [
 ]
 
 
+# Lazy-loaded + cached model list (avoids HTTP at import time)
+_cached_media_models: list | None = None
+
+
 def get_media_models() -> list:
-    """Load image media models from API, fallback to defaults on error."""
+    """Load image media models from API, fallback to defaults on error.
+    
+    Caches result after first successful fetch to avoid repeated HTTP calls.
+    Returns DEFAULT_MEDIA_MODELS immediately on any error (never blocks ComfyUI startup).
+    """
+    global _cached_media_models
+    if _cached_media_models is not None:
+        return _cached_media_models
     try:
-        return get_model_options(model_type="image")
+        _cached_media_models = get_model_options(model_type="image")
     except Exception as e:
         logger.warning("Failed to fetch media models from API: %s. Using defaults.", e)
-        return DEFAULT_MEDIA_MODELS
+        _cached_media_models = DEFAULT_MEDIA_MODELS
+    return _cached_media_models
 
 
 ASPECT_RATIOS = [

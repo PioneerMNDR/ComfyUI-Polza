@@ -31,13 +31,25 @@ DEFAULT_T2I_MODELS = [
 ]
 
 
+# Lazy-loaded + cached model list (avoids HTTP at import time)
+_cached_t2i_models: list | None = None
+
+
 def get_t2i_models() -> list:
-    """Load image generation models from API, fallback to defaults on error."""
+    """Load image generation models from API, fallback to defaults on error.
+    
+    Caches result after first successful fetch to avoid repeated HTTP calls.
+    Returns DEFAULT_T2I_MODELS immediately on any error (never blocks ComfyUI startup).
+    """
+    global _cached_t2i_models
+    if _cached_t2i_models is not None:
+        return _cached_t2i_models
     try:
-        return get_model_options(model_type="image")
+        _cached_t2i_models = get_model_options(model_type="image")
     except Exception as e:
         logger.warning("Failed to fetch T2I models from API: %s. Using defaults.", e)
-        return DEFAULT_T2I_MODELS
+        _cached_t2i_models = DEFAULT_T2I_MODELS
+    return _cached_t2i_models
 
 
 SIZES = [

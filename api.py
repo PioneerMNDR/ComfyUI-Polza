@@ -419,7 +419,7 @@ def get_models(model_type: str | None = None, include_providers: bool = False) -
     logger.info("Fetching models from %s with params %s", url, params)
     
     try:
-        resp = requests.get(url, params=params, timeout=30)
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         return data.get("data", [])

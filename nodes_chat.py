@@ -29,13 +29,25 @@ DEFAULT_MODELS = [
 ]
 
 
+# Lazy-loaded + cached model list (avoids HTTP at import time)
+_cached_chat_models: list | None = None
+
+
 def get_chat_models() -> list:
-    """Load chat models from API, fallback to defaults on error."""
+    """Load chat models from API, fallback to defaults on error.
+    
+    Caches result after first successful fetch to avoid repeated HTTP calls.
+    Returns DEFAULT_MODELS immediately on any error (never blocks ComfyUI startup).
+    """
+    global _cached_chat_models
+    if _cached_chat_models is not None:
+        return _cached_chat_models
     try:
-        return get_model_options(model_type="chat")
+        _cached_chat_models = get_model_options(model_type="chat")
     except Exception as e:
         logger.warning("Failed to fetch chat models from API: %s. Using defaults.", e)
-        return DEFAULT_MODELS
+        _cached_chat_models = DEFAULT_MODELS
+    return _cached_chat_models
 
 
 class PolzaChat:

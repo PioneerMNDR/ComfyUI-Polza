@@ -27,16 +27,26 @@ DEFAULT_VISION_MODELS = [
 ]
 
 
+# Lazy-loaded + cached model list (avoids HTTP at import time)
+_cached_vision_models: list | None = None
+
+
 def get_vision_models() -> list:
-    """Load vision-capable models from API, fallback to defaults on error."""
+    """Load vision-capable models from API, fallback to defaults on error.
+    
+    Caches result after first successful fetch to avoid repeated HTTP calls.
+    Returns DEFAULT_VISION_MODELS immediately on any error (never blocks ComfyUI startup).
+    """
+    global _cached_vision_models
+    if _cached_vision_models is not None:
+        return _cached_vision_models
     try:
         models = get_model_options(model_type="chat")
-        # Filter to only models that support image input
-        # For now, return all chat models as fallback since modality filtering requires more API data
-        return models[:50] if len(models) > 50 else models
+        _cached_vision_models = models[:50] if len(models) > 50 else models
     except Exception as e:
         logger.warning("Failed to fetch vision models from API: %s. Using defaults.", e)
-        return DEFAULT_VISION_MODELS
+        _cached_vision_models = DEFAULT_VISION_MODELS
+    return _cached_vision_models
 
 
 def _tensor_to_data_uri(tensor: torch.Tensor) -> str:
