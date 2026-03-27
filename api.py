@@ -318,24 +318,33 @@ def tensor_to_b64(tensor: torch.Tensor, fmt: str = "PNG") -> str:
 def images_from_generation(data: dict) -> List[Image.Image]:
     """
     Extract PIL images from a generation response.
-
-    Works with both /v2/images/generations and /v1/media responses.
-    Returns a list of PIL Images.
+    Handles both list and single-object 'data' field.
     """
     images: List[Image.Image] = []
-    data_items = data.get("data") or []
+    raw = data.get("data")
+
+    if raw is None:
+        return images
+
+    # ── Normalize: single dict → list ───────────────────────────────
+    if isinstance(raw, dict):
+        data_items = [raw]
+    elif isinstance(raw, list):
+        data_items = raw
+    else:
+        return images
 
     for item in data_items:
         if not isinstance(item, dict):
             continue
 
-        # ── b64_json (inline base64) ─────────────────────────────────
+        # ── b64_json ─────────────────────────────────────────────
         b64 = item.get("b64_json")
         if b64:
             images.append(b64_to_pil(b64))
             continue
 
-        # ── url ──────────────────────────────────────────────────────
+        # ── url ──────────────────────────────────────────────────
         url = item.get("url")
         if url:
             try:
