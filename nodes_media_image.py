@@ -118,6 +118,22 @@ VIDEO_RESOLUTIONS   = ["auto","480p","580p","720p","1080p"]
 VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a")
 
+# ── Model type detection ───────────────────────────────────────
+VIDEO_MODEL_PREFIXES = ["kling", "veo", "wan", "sora", "seedance", "minimax", "luma"]
+AUDIO_MODEL_PREFIXES = ["elevenlabs", "tts", "stt", "whisper"]
+
+
+def _is_video_model(model: str) -> bool:
+    """Return True if model is a video generation model."""
+    model_lower = model.lower()
+    return any(prefix in model_lower for prefix in VIDEO_MODEL_PREFIXES)
+
+
+def _is_audio_model(model: str) -> bool:
+    """Return True if model is an audio generation model."""
+    model_lower = model.lower()
+    return any(prefix in model_lower for prefix in AUDIO_MODEL_PREFIXES)
+
 
 def _classify_url(url: str) -> str:
     """Return 'video', 'audio', or 'image'."""
@@ -220,8 +236,9 @@ class PolzaMedia:
 
     # ── Native ComfyUI VIDEO type ─────────────────────────────
     # Connects directly to SaveVideo, GetVideoComponents, VideoSlice, etc.
-    RETURN_TYPES = ("IMAGE", "VIDEO", "STRING", "STRING", "STRING", "FLOAT")
-    RETURN_NAMES = ("images", "video", "media_url", "media_id", "text_response", "cost_rub")
+    # AUDIO output: dict for PreviewAudio / SaveAudio nodes
+    RETURN_TYPES = ("IMAGE", "VIDEO", "AUDIO", "STRING", "STRING", "STRING", "FLOAT")
+    RETURN_NAMES = ("images", "video", "audio", "media_url", "media_id", "text_response", "cost_rub")
 
     DESCRIPTION = (
         "Универсальная генерация медиа через Polza.ai Media API.\n\n"
@@ -348,9 +365,19 @@ class PolzaMedia:
         if guidance_scale > 0:          inp["guidance_scale"] = guidance_scale
         if is_enhance:                  inp["isEnhance"] = True
         if not enable_safety:           inp["enable_safety_checker"] = False
-        if duration != "auto":          inp["duration"] = duration
-        if video_resolution != "auto":  inp["resolution"] = video_resolution
-        if sound:                       inp["sound"] = True
+
+        # Video models require duration and resolution — use defaults if "auto"
+        if _is_video_model(model):
+            inp["duration"] = duration if duration != "auto" else "5s"
+            inp["resolution"] = video_resolution if video_resolution != "auto" else "720p"
+            if sound:
+                inp["sound"] = True
+        else:
+            # Non-video models — only send if not auto
+            if duration != "auto":
+                inp["duration"] = duration
+            if video_resolution != "auto":
+                inp["resolution"] = video_resolution
         # ── 3a. Encode input VIDEO ─────────────────────────────────
         if video is not None and _video_tensor_to_images is not None:
             try:
@@ -392,6 +419,11 @@ class PolzaMedia:
             inp.update(extra)
 
         # ── 5. Call API ──────────────────────────────────────────
+        # Log full input for debugging "This field is required" errors
+        logger.info(
+            "PolzaMedia: sending input: %s",
+            json.dumps(inp, ensure_ascii=False, indent=2)
+        )
         try:
             data = media_create(key, model=model, input=inp)
         except PolzaAPIError as exc:
@@ -482,6 +514,17 @@ class PolzaMedia:
             except Exception as exc:
                 logger.warning("PolzaMedia: VideoFromComponents failed: %s", exc)
 
+        # ── 9b. Build AUDIO output ──────────────────────────────────
+        audio_output: Optional[dict] = None
+        if audio_files:
+            audio_path, audio_filename = audio_files[0]
+            audio_output = {
+                "filename": audio_filename,
+                "subfolder": "",
+                "type": "temp",
+            }
+            logger.info("PolzaMedia: audio output ready: %s", audio_filename)
+
         # ── 10. Validate we got something ────────────────────────
         if not pil_images and not video_filepath and not audio_files and not text_response:
             return self._error(
@@ -530,6 +573,7 @@ class PolzaMedia:
             "result": (
                 batch_tensor,       # IMAGE
                 video_output,       # VIDEO  ← native, connects to SaveVideo
+                audio_output,       # AUDIO  ← dict for PreviewAudio / SaveAudio
                 media_url_str,      # STRING
                 media_id,           # STRING
                 text_response,      # STRING
@@ -559,5 +603,5 @@ class PolzaMedia:
                 logger.warning("PolzaMedia: failed to create blank video: %s", exc)
         return {
             "ui":     {"text": [msg]},
-            "result": (blank, video_blank, "", "", "", 0.0),
+            "result": (blank, video_blank, None, "", "", "", 0.0),
         }
