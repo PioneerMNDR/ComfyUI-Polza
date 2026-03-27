@@ -47,10 +47,8 @@ try:
     def _video_tensor_to_images(video_tensor: torch.Tensor) -> list[np.ndarray]:
         """Convert VIDEO tensor [B,H,W,C] or [B,T,H,W,C] to list of RGB images."""
         if video_tensor.dim() == 5:
-            # [B, T, H, W, C] → take first batch
             video_tensor = video_tensor[0]
         elif video_tensor.dim() == 4:
-            # Already [T, H, W, C]
             pass
         else:
             raise ValueError(f"Unexpected video tensor shape: {video_tensor.shape}")
@@ -69,44 +67,48 @@ except ImportError:
 logger = logging.getLogger("PolzaAI")
 
 
-def _truncate_for_log(value, max_len: int = 20) -> str:
-    """Обрезает значение для логов: строки → max_len символов, контейнеры → рекурсивно."""
-    if isinstance(value, str):
-        return value[:max_len] + ("…" if len(value) > max_len else "")
-    elif isinstance(value, dict):
-        return {k: _truncate_for_log(v, max_len) for k, v in value.items()}
-    elif isinstance(value, (list, tuple)):
-        return [_truncate_for_log(v, max_len) for v in value]
-    return value
-
-
 # ╔═══════════════════════════════════════════════════════════════════╗
 # ║  Model list                                                      ║
 # ╚═══════════════════════════════════════════════════════════════════╝
 
 DEFAULT_ALL_MEDIA_MODELS: list[str] = [
+    # Image
     "seedream-3", "seedream-4-5", "nano-banana", "gpt-image-1",
     "flux-1-1-ultra", "grok-2-image",
+    # Video
     "veo-3", "veo-3-1", "wan-2-6", "kling-3-0", "seedance-1-0", "sora",
-    "elevenlabs-tts-turbo",
+    # Audio / TTS / STT
+    "elevenlabs-tts-turbo", "elevenlabs-tts-flash",
+    "openai/gpt-audio",
 ]
+
+# All model type categories that the /v1/media endpoint can handle
+_MEDIA_MODEL_TYPES = ("image", "video", "audio", "tts", "stt")
 
 _cached_all_models: list[str] | None = None
 
 
 def _get_all_media_models() -> list[str]:
+    """Fetch all media-capable models from the API (image + video + audio + tts + stt)."""
     global _cached_all_models
     if _cached_all_models is not None:
         return _cached_all_models
+
     collected: set[str] = set()
-    for model_type in ("image", "video", "audio"):
+    for mt in _MEDIA_MODEL_TYPES:
         try:
-            collected.update(get_model_options(model_type=model_type))
+            collected.update(get_model_options(model_type=mt))
         except Exception as exc:
-            logger.warning("Failed to fetch %s models: %s", model_type, exc)
-    _cached_all_models = (
-        sorted(collected, key=str.lower) if collected else list(DEFAULT_ALL_MEDIA_MODELS)
-    )
+            logger.warning("Failed to fetch '%s' models: %s", mt, exc)
+
+    if collected:
+        _cached_all_models = sorted(collected, key=str.lower)
+    else:
+        logger.warning("Could not fetch models from API, using defaults")
+        _cached_all_models = list(DEFAULT_ALL_MEDIA_MODELS)
+
+    logger.info("PolzaMedia: loaded %d models: %s", len(_cached_all_models),
+                ", ".join(_cached_all_models[:10]) + ("…" if len(_cached_all_models) > 10 else ""))
     return _cached_all_models
 
 
@@ -130,25 +132,37 @@ VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a")
 
 # ── Model type detection ───────────────────────────────────────
-VIDEO_MODEL_PREFIXES = ["kling", "veo", "wan", "sora", "seedance", "minimax", "luma"]
-AUDIO_MODEL_PREFIXES = ["elevenlabs", "tts", "stt", "whisper", "gpt-audio", "audio"]
+VIDEO_MODEL_KEYWORDS = [
+    "kling", "veo", "wan", "sora", "seedance", "minimax", "luma",
+    "runway", "pika", "gen-3", "gen-4",
+]
+AUDIO_MODEL_KEYWORDS = [
+    "elevenlabs", "tts", "stt", "whisper", "audio", "voice",
+    "speech", "sound",
+]
 
 
 def _is_video_model(model: str) -> bool:
     """Return True if model is a video generation model."""
     model_lower = model.lower()
-    return any(prefix in model_lower for prefix in VIDEO_MODEL_PREFIXES)
+    return any(kw in model_lower for kw in VIDEO_MODEL_KEYWORDS)
 
 
 def _is_audio_model(model: str) -> bool:
     """Return True if model is an audio generation model."""
     model_lower = model.lower()
-    return any(prefix in model_lower for prefix in AUDIO_MODEL_PREFIXES)
+    return any(kw in model_lower for kw in AUDIO_MODEL_KEYWORDS)
 
 
-def _get_video_model_type(model: str) -> str:
-    """Возвращает тип модели для правильного форматирования параметров."""
+def _get_model_type(model: str) -> str:
+    """
+    Determine the model type for building the correct API input.
+    
+    Returns one of: "kling", "wan", "veo", "sora", "seedance", "audio", "image"
+    """
     model_lower = model.lower()
+
+    # Video models — specific types
     if "kling" in model_lower:
         return "kling"
     elif "wan" in model_lower:
@@ -159,8 +173,14 @@ def _get_video_model_type(model: str) -> str:
         return "sora"
     elif "seedance" in model_lower:
         return "seedance"
+    elif _is_video_model(model):
+        return "video_generic"
+
+    # Audio models
     elif _is_audio_model(model):
         return "audio"
+
+    # Default — image
     return "image"
 
 
@@ -179,11 +199,11 @@ def _build_video_input(
     """Строит input dict с учётом специфики каждой видео-модели."""
 
     inp: dict = {"prompt": prompt}
-    model_type = _get_video_model_type(model)
+    model_type = _get_model_type(model)
 
     # ── Kling 3.0 ────────────────────────────────────────────
     if model_type == "kling":
-        # duration — строка (API ожидает строку, не число)
+        # duration — MUST be a string
         if duration in ("auto", "5s"):
             inp["duration"] = "5"
         elif duration == "10s":
@@ -191,41 +211,27 @@ def _build_video_input(
         else:
             inp["duration"] = "5"
 
-        # mode — обязателен
         inp["mode"] = mode  # "std" или "pro"
-
-        # sound — строка
         inp["sound"] = "true" if sound else "false"
-
-        # aspect_ratio
         inp["aspect_ratio"] = aspect_ratio if aspect_ratio != "auto" else "16:9"
 
-        # images — пустой массив если нет входного
         if image is None:
             inp["images"] = []
 
     # ── Wan 2.5 / 2.6 ────────────────────────────────────────
     elif model_type == "wan":
-        # duration — строка "5" или "10" (без "s"!)
         if duration in ("auto", "5s"):
             inp["duration"] = "5"
         elif duration == "10s":
             inp["duration"] = "10"
         elif duration == "15s":
-            inp["duration"] = "10"  # max 10
+            inp["duration"] = "10"
         else:
             inp["duration"] = "5"
 
-        # resolution — строка
-        if video_resolution != "auto":
-            inp["resolution"] = video_resolution
-        else:
-            inp["resolution"] = "720p"
-
-        # multi_shots — строка
+        inp["resolution"] = video_resolution if video_resolution != "auto" else "720p"
         inp["multi_shots"] = "true" if multi_shots else "false"
 
-        # images — пустой массив если нет входного
         if image is None:
             inp["images"] = []
 
@@ -234,7 +240,7 @@ def _build_video_input(
         if aspect_ratio != "auto":
             inp["aspect_ratio"] = aspect_ratio
         if duration != "auto":
-            inp["duration"] = duration  # "5s", "10s" — строка с "s"
+            inp["duration"] = duration
 
     # ── Sora ─────────────────────────────────────────────────
     elif model_type == "sora":
@@ -252,7 +258,7 @@ def _build_video_input(
         if duration != "auto":
             inp["duration"] = duration
 
-    # ── Fallback для неизвестных ─────────────────────────────
+    # ── Generic video ────────────────────────────────────────
     else:
         if aspect_ratio != "auto":
             inp["aspect_ratio"] = aspect_ratio
@@ -291,10 +297,6 @@ def _url_media_kind(url: str) -> str:
 # ╚═══════════════════════════════════════════════════════════════════╝
 
 def _download_video_to_temp(url: str) -> tuple[str, str]:
-    """
-    Download video to ComfyUI temp directory.
-    Returns (full_path, filename).
-    """
     lo = url.lower().split("?")[0]
     ext = ".mp4"
     for candidate in VIDEO_EXTENSIONS:
@@ -315,7 +317,6 @@ def _download_video_to_temp(url: str) -> tuple[str, str]:
 
 
 def _download_audio_to_temp(url: str) -> tuple[str, str]:
-    """Download audio to ComfyUI temp directory."""
     lo = url.lower().split("?")[0]
     ext = ".mp3"
     for candidate in AUDIO_EXTENSIONS:
@@ -353,6 +354,7 @@ class PolzaMedia:
     Outputs:
       • images        — IMAGE tensor (batch) for generated images
       • video         — native VIDEO output → connects to SaveVideo / GetVideoComponents
+      • audio         — AUDIO output → connects to PreviewAudio / SaveAudio
       • media_url     — raw URL(s) for any media type
       • media_id      — generation task ID
       • text_response — text content from the API response
@@ -363,16 +365,14 @@ class PolzaMedia:
     FUNCTION    = "execute"
     OUTPUT_NODE = True
 
-    # ── Native ComfyUI VIDEO type ─────────────────────────────
-    # Connects directly to SaveVideo, GetVideoComponents, VideoSlice, etc.
-    # AUDIO output: dict for PreviewAudio / SaveAudio nodes
     RETURN_TYPES = ("IMAGE", "VIDEO", "AUDIO", "STRING", "STRING", "STRING", "FLOAT")
     RETURN_NAMES = ("images", "video", "audio", "media_url", "media_id", "text_response", "cost_rub")
 
     DESCRIPTION = (
         "Универсальная генерация медиа через Polza.ai Media API.\n\n"
-        "🖼️ Изображения · 🎬 Видео (нативный VIDEO → SaveVideo) · 🔊 Аудио · 🎵 Музыка\n\n"
+        "🖼️ Изображения · 🎬 Видео (нативный VIDEO → SaveVideo) · 🔊 Аудио (TTS → PreviewAudio)\n\n"
         "Выход «video» напрямую подключается к SaveVideo / GetVideoComponents.\n"
+        "Выход «audio» подключается к PreviewAudio / SaveAudio.\n"
         "Подключите IMAGE для img2img / img2vid.\n"
         "Любые параметры API — через extra_params_json."
     )
@@ -382,12 +382,12 @@ class PolzaMedia:
         return {
             "required": {
                 "model": (_get_all_media_models(), {
-                    "default": "seedream-3",
+                    "default": _get_all_media_models()[0] if _get_all_media_models() else "seedream-3",
                     "tooltip": (
                         "ID модели Polza.ai.\n"
                         "Изображения: seedream-3, gpt-image-1, flux-1-1-ultra …\n"
                         "Видео: veo-3-1, wan-2-6, kling-3-0, sora …\n"
-                        "Аудио: elevenlabs-tts-turbo …"
+                        "Аудио/TTS: elevenlabs-tts-turbo, openai/gpt-audio …"
                     ),
                 }),
                 "prompt": ("STRING", {
@@ -491,12 +491,13 @@ class PolzaMedia:
         if not prompt.strip():
             return self._error("❌ Промпт не может быть пустым")
 
-        # ── 2. Build input dict ──────────────────────────────────
-        model_type = _get_video_model_type(model)
+        # ── 2. Determine model type ─────────────────────────────
+        model_type = _get_model_type(model)
         logger.info("PolzaMedia: start  model=%s  type=%s", model, model_type)
 
-        if model_type in ("kling", "wan", "veo", "sora", "seedance"):
-            # Видео-модель — используем специальный билдер
+        # ── 3. Build input dict ──────────────────────────────────
+        if model_type in ("kling", "wan", "veo", "sora", "seedance", "video_generic"):
+            # Video model — use specialized builder
             inp = _build_video_input(
                 model=model,
                 prompt=prompt,
@@ -509,11 +510,20 @@ class PolzaMedia:
                 image=image,
                 strength=strength,
             )
+
         elif model_type == "audio":
-            # Аудио-модель — только релевантные параметры
+            # Audio / TTS model — only send relevant params, NOT image/video params
             inp = {"prompt": prompt}
+            # voice, speed, language are relevant for TTS
+            if voice.strip():
+                inp["voice"] = voice.strip()
+            if speed != 1.0:
+                inp["speed"] = speed
+            if language_code.strip():
+                inp["language_code"] = language_code.strip()
+
         else:
-            # Изображение или аудио — общая логика
+            # Image model — general logic
             inp = {"prompt": prompt}
             if aspect_ratio != "auto":
                 inp["aspect_ratio"] = aspect_ratio
@@ -533,15 +543,11 @@ class PolzaMedia:
                 inp["isEnhance"] = True
             if not enable_safety:
                 inp["enable_safety_checker"] = False
-            if duration != "auto":
-                inp["duration"] = duration
-            if video_resolution != "auto":
-                inp["resolution"] = video_resolution
+
         # ── 3a. Encode input VIDEO ─────────────────────────────────
-        if video is not None and _video_tensor_to_images is not None:
+        if video is not None and _video_tensor_to_images is not None and model_type != "audio":
             try:
                 frames = _video_tensor_to_images(video)
-                # Encode first frame as image for video-to-video
                 if frames:
                     frame = frames[0]
                     pil_img = Image.fromarray(frame)
@@ -552,12 +558,19 @@ class PolzaMedia:
                     logger.info("PolzaMedia: attached video input (%d frames, using frame 0)", len(frames))
             except Exception as exc:
                 logger.warning("PolzaMedia: failed to encode video input: %s", exc)
-        if voice.strip():               inp["voice"] = voice.strip()
-        if speed != 1.0:                inp["speed"] = speed
-        if language_code.strip():       inp["language_code"] = language_code.strip()
 
-        # ── 3. Encode batch IMAGE ────────────────────────────────
-        if image is not None:
+        # ── 3b. Audio-specific params for non-audio models ──────────
+        # (voice/speed/language_code are already handled in audio branch above)
+        if model_type != "audio":
+            if voice.strip():
+                inp["voice"] = voice.strip()
+            if speed != 1.0:
+                inp["speed"] = speed
+            if language_code.strip():
+                inp["language_code"] = language_code.strip()
+
+        # ── 4. Encode batch IMAGE ────────────────────────────────
+        if image is not None and model_type != "audio":
             img_4d = image if image.dim() == 4 else image.unsqueeze(0)
             encoded: list[dict] = []
             for i in range(img_4d.shape[0]):
@@ -568,7 +581,7 @@ class PolzaMedia:
                 inp["strength"] = strength
             logger.info("PolzaMedia: attached %d image(s)", len(encoded))
 
-        # ── 4. Merge extra JSON ──────────────────────────────────
+        # ── 5. Merge extra JSON ──────────────────────────────────
         if extra_params_json.strip():
             try:
                 extra = json.loads(extra_params_json)
@@ -578,13 +591,8 @@ class PolzaMedia:
                 return self._error("❌ extra_params_json должен быть JSON-объектом {}")
             inp.update(extra)
 
-        # ── 5. Call API ──────────────────────────────────────────
-        # Log full input for debugging "This field is required" errors
-        logger.info(
-            "PolzaMedia [%s]: %s",
-            model_type,
-            json.dumps(_truncate_for_log(inp), ensure_ascii=False)
-        )
+        # ── 6. Call API ──────────────────────────────────────────
+        logger.info("PolzaMedia [%s]: %s", model_type, json.dumps(inp, ensure_ascii=False))
         try:
             data = media_create(key, model=model, input=inp)
         except PolzaAPIError as exc:
@@ -595,14 +603,14 @@ class PolzaMedia:
 
         elapsed = time.time() - t0
         status = data.get("status", "?")
-        logger.info("PolzaMedia: status=%s  id=%s  %.1fs", status, data.get("id","?"), elapsed)
+        logger.info("PolzaMedia: status=%s  id=%s  %.1fs", status, data.get("id", "?"), elapsed)
 
         if status == "failed":
             err_obj = data.get("error", {})
             err_msg = err_obj.get("message", "Ошибка") if isinstance(err_obj, dict) else str(err_obj)
             return self._error(f"❌ Генерация не удалась: {err_msg}")
 
-        # ── 6. Parse response ────────────────────────────────────
+        # ── 7. Parse response ────────────────────────────────────
         pil_images    = images_from_generation(data)
         media_urls    = _extract_media_urls(data)
         media_url_str = "\n".join(media_urls)
@@ -612,10 +620,10 @@ class PolzaMedia:
         cost_rub, usage_summary = extract_usage_info(data)
         warnings_list = data.get("warnings") or []
 
-        # ── 7. Download and classify media ───────────────────────
+        # ── 8. Download and classify media ───────────────────────
         video_filepath: str | None = None
         video_filename: str | None = None
-        audio_files: list[tuple[str, str]] = []   # (path, filename)
+        audio_files: list[tuple[str, str]] = []
 
         for url in media_urls:
             kind = _classify_url(url)
@@ -630,16 +638,13 @@ class PolzaMedia:
                 except Exception as exc:
                     logger.error("PolzaMedia: audio download failed: %s", exc)
 
-        # ── 8. Build IMAGE tensor ────────────────────────────────
+        # ── 9. Build IMAGE tensor ────────────────────────────────
         if pil_images:
             batch_tensor = images_to_batch_tensor(pil_images)
         else:
             batch_tensor = torch.zeros(1, 64, 64, 3, dtype=torch.float32)
 
-        # ── 9. Build native VIDEO output ─────────────────────────
-        #   InputImpl.VideoFromFile() creates the object that
-        #   SaveVideo / GetVideoComponents / VideoSlice understand.
-        #   If no video file but we have images → create VIDEO from components.
+        # ── 10. Build native VIDEO output ────────────────────────
         video_output: Optional[object] = None
         if video_filepath and _HAS_NATIVE_VIDEO:
             try:
@@ -650,59 +655,59 @@ class PolzaMedia:
         elif video_filepath and not _HAS_NATIVE_VIDEO:
             logger.warning(
                 "PolzaMedia: video downloaded but comfy_api.latest not available. "
-                "Update ComfyUI for native VIDEO output (SaveVideo, etc.)."
+                "Update ComfyUI for native VIDEO output."
             )
-        # ── 9a. Fallback: create VIDEO from generated images ──────
+        # Fallback: create VIDEO from generated images
         elif pil_images and not video_filepath and _HAS_NATIVE_VIDEO:
             try:
-                # Convert PIL images to tensor batch, then to list of frames
-                video_tensor = images_to_batch_tensor(pil_images)  # [B,H,W,C] float32
-                # Ensure RGB uint8 format for VideoComponents
-                frames: list[np.ndarray] = []
+                video_tensor = images_to_batch_tensor(pil_images)
+                frames_list: list[np.ndarray] = []
                 for i in range(video_tensor.shape[0]):
                     frame = video_tensor[i].cpu().numpy()
                     if frame.dtype != np.uint8:
                         frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
-                    frames.append(frame)
+                    frames_list.append(frame)
                 video_output = InputImpl.VideoFromComponents(
                     Types.VideoComponents(
-                        images=np.stack(frames),
+                        images=np.stack(frames_list),  # ndarray, not list!
                         audio=None,
                         frame_rate=Fraction(1),
                     )
                 )
-                logger.info("PolzaMedia: created native VIDEO from %d image(s)", len(frames))
+                logger.info("PolzaMedia: created native VIDEO from %d image(s)", len(frames_list))
             except Exception as exc:
                 logger.warning("PolzaMedia: VideoFromComponents failed: %s", exc)
 
-        # ── 9b. Build AUDIO output ──────────────────────────────────
+        # ── 11. Build AUDIO output ───────────────────────────────
         audio_output: Optional[dict] = None
         if audio_files:
             audio_path, audio_filename = audio_files[0]
             try:
                 import torchaudio
                 waveform, sample_rate = torchaudio.load(audio_path)
-                # torchaudio returns [channels, samples], ComfyUI expects [batch, channels, samples]
+                # torchaudio returns [channels, samples]
+                # ComfyUI expects [batch, channels, samples]
                 if waveform.dim() == 2:
                     waveform = waveform.unsqueeze(0)
                 audio_output = {"waveform": waveform, "sample_rate": sample_rate}
                 logger.info("PolzaMedia: audio loaded: %s (%d Hz, %.1fs)",
                            audio_filename, sample_rate, waveform.shape[-1] / sample_rate)
             except ImportError:
-                logger.warning("PolzaMedia: torchaudio not available, audio output will be None")
-                audio_output = None
+                logger.warning(
+                    "PolzaMedia: torchaudio not available — cannot create AUDIO output. "
+                    "Install torchaudio or use media_url to access the audio file."
+                )
             except Exception as exc:
                 logger.warning("PolzaMedia: failed to load audio %s: %s", audio_path, exc)
-                audio_output = None
 
-        # ── 10. Validate we got something ────────────────────────
+        # ── 12. Validate we got something ────────────────────────
         if not pil_images and not video_filepath and not audio_files and not text_response:
             return self._error(
                 f"❌ API не вернул ни изображений, ни видео, ни аудио.\n"
                 f"status={status}  id={media_id}"
             )
 
-        # ── 11. Build UI dict ────────────────────────────────────
+        # ── 13. Build UI dict ────────────────────────────────────
         ui: dict = {"text": []}
         ui_text: list[str] = ui["text"]
 
@@ -711,10 +716,8 @@ class PolzaMedia:
             h, w = batch_tensor.shape[1], batch_tensor.shape[2]
             ui_text.append(f"✅ {n} image{'s' if n > 1 else ''} · {w}×{h}")
 
-        # Video preview on the node itself
         if video_filename:
             ui_text.append(f"🎬 Video: {video_filename}")
-            # ComfyUI frontend looks for "gifs" key to show animated/video preview
             ui["gifs"] = [{
                 "filename": video_filename,
                 "subfolder": "",
@@ -742,8 +745,8 @@ class PolzaMedia:
             "ui":     ui,
             "result": (
                 batch_tensor,       # IMAGE
-                video_output,       # VIDEO  ← native, connects to SaveVideo
-                audio_output,       # AUDIO  ← dict for PreviewAudio / SaveAudio
+                video_output,       # VIDEO
+                audio_output,       # AUDIO
                 media_url_str,      # STRING
                 media_id,           # STRING
                 text_response,      # STRING
@@ -757,22 +760,25 @@ class PolzaMedia:
     def _error(msg: str) -> dict:
         logger.error("PolzaMedia: %s", msg)
         blank = torch.zeros(1, 64, 64, 3, dtype=torch.float32)
-        # Create a minimal valid VIDEO from the blank image
+
+        # Create a minimal valid VIDEO
         video_blank = None
         if _HAS_NATIVE_VIDEO and InputImpl is not None and Types is not None:
             try:
                 frame = (blank[0].cpu().numpy() * 255).astype(np.uint8)
                 video_blank = InputImpl.VideoFromComponents(
                     Types.VideoComponents(
-                        images=np.stack([frame]),
+                        images=np.stack([frame]),  # ndarray, not list!
                         audio=None,
                         frame_rate=Fraction(1),
                     )
                 )
             except Exception as exc:
                 logger.warning("PolzaMedia: failed to create blank video: %s", exc)
-        # Create minimal silent audio so PreviewAudio doesn't crash
+
+        # Create minimal silent audio so PreviewAudio doesn't crash on None
         audio_blank = {"waveform": torch.zeros(1, 1, 16000), "sample_rate": 16000}
+
         return {
             "ui":     {"text": [msg]},
             "result": (blank, video_blank, audio_blank, "", "", "", 0.0),
