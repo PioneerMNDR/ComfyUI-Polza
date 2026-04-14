@@ -41,8 +41,10 @@ def get_vision_models() -> list[str]:
     if _cached_vision_models is not None:
         return _cached_vision_models
     try:
-        models = get_model_options(model_type="chat")
-        _cached_vision_models = models[:50] if len(models) > 50 else models
+        _cached_vision_models = get_model_options(
+            model_type="chat",
+            require_input_modality="image",
+        )
     except Exception as e:
         logger.warning("Failed to fetch vision models from API: %s. Using defaults.", e)
         _cached_vision_models = DEFAULT_VISION_MODELS

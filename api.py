@@ -347,24 +347,71 @@ def _log_usage(data: dict):
 # ║  Models List                                                     ║
 # ╚═══════════════════════════════════════════════════════════════════╝
 
-def get_models(model_type: str | None = None, include_providers: bool = False) -> List[dict]:
-    params = {}
+def get_models(
+    model_type: str | None = None,
+    include_providers: bool = False,
+    api_key: str | None = None,
+) -> List[dict]:
+    params: Dict[str, Any] = {}
     if model_type:
         params["type"] = model_type
     if include_providers:
         params["include_providers"] = "true"
+
+    headers: Dict[str, str] = {}
+    key = (api_key or "").strip()
+    if not key:
+        try:
+            key = resolve_api_key("")
+        except ValueError:
+            key = ""
+    if key:
+        headers = _headers(key)
+        headers.pop("Content-Type", None)
+
     url = f"{API_BASE}/v1/models"
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        return resp.json().get("data", [])
-    except Exception as exc:
-        logger.error("Error fetching models: %s", exc)
-        raise PolzaAPIError(500, f"Ошибка получения моделей: {exc}")
+        resp = requests.get(url, params=params, headers=headers or None, timeout=15)
+    except requests.exceptions.Timeout:
+        raise PolzaAPIError(408, "Таймаут запроса списка моделей")
+    except requests.exceptions.ConnectionError:
+        raise PolzaAPIError(503, "Нет соединения с polza.ai")
+
+    if resp.status_code != 200:
+        try:
+            msg = resp.json().get("error", {}).get("message", resp.text)
+        except Exception:
+            msg = resp.text
+        raise PolzaAPIError(resp.status_code, msg)
+
+    return resp.json().get("data", [])
 
 
-def get_model_options(model_type: str | None = None) -> List[str]:
+def get_model_options(
+    model_type: str | None = None,
+    require_input_modality: str | None = None,
+) -> List[str]:
     models = get_models(model_type=model_type)
+
+    if require_input_modality:
+        wanted = require_input_modality.lower()
+
+        def _supports_modality(model: dict) -> bool:
+            arch = model.get("architecture") or {}
+            inputs = arch.get("input_modalities")
+            if isinstance(inputs, list):
+                if any(str(mod).strip().lower() == wanted for mod in inputs):
+                    return True
+
+            modality = arch.get("modality")
+            if isinstance(modality, str) and "->" in modality:
+                lhs = modality.split("->", 1)[0]
+                parts = [part.strip().lower() for part in lhs.split("+")]
+                return wanted in parts
+            return False
+
+        models = [m for m in models if _supports_modality(m)]
+
     options = [m.get("id", "") for m in models if m.get("id")]
     options.sort(key=str.lower)
     return options
