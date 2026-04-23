@@ -8,7 +8,15 @@ from __future__ import annotations
 import logging
 from typing import Tuple
 
-from .api import resolve_api_key, chat_completion, extract_response, PolzaAPIError, get_model_options
+from .api import (
+    get_cached_or_placeholder_model_options,
+    resolve_api_key,
+    chat_completion,
+    extract_response,
+    PolzaAPIError,
+    UNLOADED_MODEL_OPTION,
+    is_unloaded_model_option,
+)
 
 logger = logging.getLogger("PolzaAI")
 
@@ -29,25 +37,9 @@ DEFAULT_MODELS = [
 ]
 
 
-# Lazy-loaded + cached model list (avoids HTTP at import time)
-_cached_chat_models: list | None = None
-
-
 def get_chat_models() -> list[str]:
-    """Load chat models from API, fallback to defaults on error.
-    
-    Caches result after first successful fetch to avoid repeated HTTP calls.
-    Returns DEFAULT_MODELS immediately on any error (never blocks ComfyUI startup).
-    """
-    global _cached_chat_models
-    if _cached_chat_models is not None:
-        return _cached_chat_models
-    try:
-        _cached_chat_models = get_model_options(model_type="chat")
-    except Exception as e:
-        logger.warning("Failed to fetch chat models from API: %s. Using defaults.", e)
-        _cached_chat_models = DEFAULT_MODELS
-    return _cached_chat_models
+    """Return runtime-loaded models, or a placeholder before the first load."""
+    return get_cached_or_placeholder_model_options("chat")
 
 
 class PolzaChat:
@@ -177,6 +169,10 @@ class PolzaChat:
             key = resolve_api_key(api_key)
         except ValueError as exc:
             err = str(exc)
+            return {"ui": {"text": [err]}, "result": (err, "", 0.0, 0)}
+
+        if is_unloaded_model_option(model):
+            err = "вќЊ РЎРЅР°С‡Р°Р»Р° РЅР°Р¶РјРёС‚Рµ Load models Рё РІС‹Р±РµСЂРёС‚Рµ РјРѕРґРµР»СЊ"
             return {"ui": {"text": [err]}, "result": (err, "", 0.0, 0)}
 
         # ── build messages ────────────────────────────────────────────

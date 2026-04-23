@@ -19,10 +19,12 @@ import torch
 import folder_paths
 
 from .api import (
+    get_cached_or_placeholder_model_options,
     PolzaAPIError,
+    UNLOADED_MODEL_OPTION,
     download_media_file,
     extract_usage_info,
-    get_model_options,
+    is_unloaded_model_option,
     images_from_generation,
     images_to_batch_tensor,
     media_create,
@@ -82,34 +84,9 @@ DEFAULT_ALL_MEDIA_MODELS: list[str] = [
     "openai/gpt-audio",
 ]
 
-# All model type categories that the /v1/media endpoint can handle
-_MEDIA_MODEL_TYPES = ("image", "video", "audio", "tts", "stt")
-
-_cached_all_models: list[str] | None = None
-
-
 def _get_all_media_models() -> list[str]:
-    """Fetch all media-capable models from the API (image + video + audio + tts + stt)."""
-    global _cached_all_models
-    if _cached_all_models is not None:
-        return _cached_all_models
-
-    collected: set[str] = set()
-    for mt in _MEDIA_MODEL_TYPES:
-        try:
-            collected.update(get_model_options(model_type=mt))
-        except Exception as exc:
-            logger.warning("Failed to fetch '%s' models: %s", mt, exc)
-
-    if collected:
-        _cached_all_models = sorted(collected, key=str.lower)
-    else:
-        logger.warning("Could not fetch models from API, using defaults")
-        _cached_all_models = list(DEFAULT_ALL_MEDIA_MODELS)
-
-    logger.info("PolzaMedia: loaded %d models: %s", len(_cached_all_models),
-                ", ".join(_cached_all_models[:10]) + ("…" if len(_cached_all_models) > 10 else ""))
-    return _cached_all_models
+    """Return runtime-loaded models, or a placeholder before the first load."""
+    return get_cached_or_placeholder_model_options("media")
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -379,10 +356,11 @@ class PolzaMedia:
 
     @classmethod
     def INPUT_TYPES(cls):
+        models = _get_all_media_models()
         return {
             "required": {
-                "model": (_get_all_media_models(), {
-                    "default": _get_all_media_models()[0] if _get_all_media_models() else "seedream-3",
+                "model": (models, {
+                    "default": models[0] if models else "seedream-3",
                     "tooltip": (
                         "ID модели Polza.ai.\n"
                         "Изображения: seedream-3, gpt-image-1, flux-1-1-ultra …\n"
@@ -487,6 +465,9 @@ class PolzaMedia:
             key = resolve_api_key(api_key)
         except ValueError as exc:
             return self._error(str(exc))
+
+        if is_unloaded_model_option(model):
+            return self._error("Click Load models first and choose a model")
 
         if not prompt.strip():
             return self._error("❌ Промпт не может быть пустым")

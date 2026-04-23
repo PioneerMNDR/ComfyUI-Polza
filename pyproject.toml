@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-polza"
 description = "A ComfyUI nodes package providing access to 300+ AI models through a unified Polza.ai API"
-version = "1.0.4"
+version = "1.0.6"
 license = { file = "LICENSE.txt" }
 dependencies = [
     "requests>=2.28.0",

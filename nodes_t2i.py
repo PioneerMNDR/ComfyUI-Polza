@@ -10,13 +10,15 @@ from __future__ import annotations
 import logging
 
 from .api import (
+    get_cached_or_placeholder_model_options,
     resolve_api_key,
     image_generation,
     images_from_generation,
     images_to_batch_tensor,
     extract_usage_info,
     PolzaAPIError,
-    get_model_options,
+    UNLOADED_MODEL_OPTION,
+    is_unloaded_model_option,
 )
 
 logger = logging.getLogger("PolzaAI")
@@ -31,25 +33,9 @@ DEFAULT_T2I_MODELS = [
 ]
 
 
-# Lazy-loaded + cached model list (avoids HTTP at import time)
-_cached_t2i_models: list | None = None
-
-
 def get_t2i_models() -> list[str]:
-    """Load image generation models from API, fallback to defaults on error.
-    
-    Caches result after first successful fetch to avoid repeated HTTP calls.
-    Returns DEFAULT_T2I_MODELS immediately on any error (never blocks ComfyUI startup).
-    """
-    global _cached_t2i_models
-    if _cached_t2i_models is not None:
-        return _cached_t2i_models
-    try:
-        _cached_t2i_models = get_model_options(model_type="image")
-    except Exception as e:
-        logger.warning("Failed to fetch T2I models from API: %s. Using defaults.", e)
-        _cached_t2i_models = DEFAULT_T2I_MODELS
-    return _cached_t2i_models
+    """Return runtime-loaded models, or a placeholder before the first load."""
+    return get_cached_or_placeholder_model_options("t2i")
 
 
 SIZES = [
@@ -177,6 +163,9 @@ class PolzaTextToImage:
             key = resolve_api_key(api_key)
         except ValueError as exc:
             return self._error(str(exc))
+
+        if is_unloaded_model_option(model):
+            return self._error("Click Load models first and choose a model")
 
         if not prompt.strip():
             return self._error("❌ Промпт не может быть пустым")

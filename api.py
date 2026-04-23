@@ -27,6 +27,9 @@ POLL_TIMEOUT    = 600
 POLL_INTERVAL   = 4
 IMAGE_DOWNLOAD_TIMEOUT  = 60
 MEDIA_DOWNLOAD_TIMEOUT  = 300   # video/audio can be large
+STARTUP_MODEL_FETCH_ENV = "POLZA_FETCH_MODELS_ON_STARTUP"
+UNLOADED_MODEL_OPTION = "Click Load models"
+_RUNTIME_MODEL_OPTIONS: dict[str, List[str]] = {}
 
 # Extensions used to distinguish media types in URLs
 _VIDEO_EXTS = (".mp4", ".webm", ".mov", ".avi", ".mkv")
@@ -390,8 +393,9 @@ def get_models(
 def get_model_options(
     model_type: str | None = None,
     require_input_modality: str | None = None,
+    api_key: str | None = None,
 ) -> List[str]:
-    models = get_models(model_type=model_type)
+    models = get_models(model_type=model_type, api_key=api_key)
 
     if require_input_modality:
         wanted = require_input_modality.lower()
@@ -415,3 +419,68 @@ def get_model_options(
     options = [m.get("id", "") for m in models if m.get("id")]
     options.sort(key=str.lower)
     return options
+
+
+def is_unloaded_model_option(value: str) -> bool:
+    return (value or "").strip() == UNLOADED_MODEL_OPTION
+
+
+def get_runtime_model_options(scope: str) -> List[str] | None:
+    options = _RUNTIME_MODEL_OPTIONS.get(scope)
+    return list(options) if options else None
+
+
+def set_runtime_model_options(scope: str, options: List[str]) -> None:
+    cleaned = sorted({str(option).strip() for option in options if str(option).strip()}, key=str.lower)
+    if cleaned:
+        _RUNTIME_MODEL_OPTIONS[scope] = cleaned
+
+
+def get_cached_or_placeholder_model_options(scope: str) -> List[str]:
+    return get_runtime_model_options(scope) or [UNLOADED_MODEL_OPTION]
+
+
+def should_fetch_models_on_startup() -> bool:
+    """
+    Return True only when the user explicitly opts into network model fetches
+    during ComfyUI startup / node schema discovery.
+
+    ComfyUI calls INPUT_TYPES while loading custom nodes, so any network access
+    here can delay or break startup. Default is safe-off.
+    """
+    value = os.environ.get(STARTUP_MODEL_FETCH_ENV, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_startup_model_options(
+    default_models: List[str],
+    *,
+    model_type: str | None = None,
+    require_input_modality: str | None = None,
+    log_label: str = "models",
+) -> List[str]:
+    """
+    Safe model options provider for INPUT_TYPES.
+
+    By default returns local fallback models immediately, without touching the
+    network, so ComfyUI can load even when Polza.ai is unavailable.
+
+    Set POLZA_FETCH_MODELS_ON_STARTUP=1 to opt into live dropdown fetching.
+    """
+    if not should_fetch_models_on_startup():
+        return list(default_models)
+
+    try:
+        options = get_model_options(
+            model_type=model_type,
+            require_input_modality=require_input_modality,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch %s during startup: %s. Using local defaults.",
+            log_label,
+            exc,
+        )
+        return list(default_models)
+
+    return options or list(default_models)

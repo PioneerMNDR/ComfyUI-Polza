@@ -13,7 +13,15 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .api import resolve_api_key, chat_completion, extract_response, PolzaAPIError, get_model_options
+from .api import (
+    get_cached_or_placeholder_model_options,
+    resolve_api_key,
+    chat_completion,
+    extract_response,
+    PolzaAPIError,
+    UNLOADED_MODEL_OPTION,
+    is_unloaded_model_option,
+)
 
 logger = logging.getLogger("PolzaAI")
 
@@ -27,28 +35,9 @@ DEFAULT_VISION_MODELS = [
 ]
 
 
-# Lazy-loaded + cached model list (avoids HTTP at import time)
-_cached_vision_models: list | None = None
-
-
 def get_vision_models() -> list[str]:
-    """Load vision-capable models from API, fallback to defaults on error.
-    
-    Caches result after first successful fetch to avoid repeated HTTP calls.
-    Returns DEFAULT_VISION_MODELS immediately on any error (never blocks ComfyUI startup).
-    """
-    global _cached_vision_models
-    if _cached_vision_models is not None:
-        return _cached_vision_models
-    try:
-        _cached_vision_models = get_model_options(
-            model_type="chat",
-            require_input_modality="image",
-        )
-    except Exception as e:
-        logger.warning("Failed to fetch vision models from API: %s. Using defaults.", e)
-        _cached_vision_models = DEFAULT_VISION_MODELS
-    return _cached_vision_models
+    """Return runtime-loaded models, or a placeholder before the first load."""
+    return get_cached_or_placeholder_model_options("vision")
 
 
 def _tensor_to_data_uri(tensor: torch.Tensor) -> str:
@@ -142,6 +131,10 @@ class PolzaVision:
             key = resolve_api_key(api_key)
         except ValueError as exc:
             err = str(exc)
+            return {"ui": {"text": [err]}, "result": (err, 0.0, 0)}
+
+        if is_unloaded_model_option(model):
+            err = "Click Load models first and choose a model"
             return {"ui": {"text": [err]}, "result": (err, 0.0, 0)}
 
         # ── encode image(s) ──────────────────────────────────────────
